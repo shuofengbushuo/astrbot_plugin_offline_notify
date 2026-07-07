@@ -1,0 +1,6 @@
+{
+    "name": "下线通知管理",
+    "description": "AI下线通知系统的管理和预览面板",
+    "icon": "notifications",
+    "order": 100
+}

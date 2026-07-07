@@ -1,0 +1,6 @@
+﻿# Plugin modification manager ignores
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+Thumbs.db

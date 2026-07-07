@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI下线通知管理</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <h1> AI下线通知系统</h1>
+      <p class="subtitle">定时向QQ群发送AI服务下线提醒</p>
+    </header>
+
+    <!-- 状态卡片 -->
+    <section class="card status-card" id="statusCard">
+      <h2>系统状态</h2>
+      <div class="status-grid">
+        <div class="status-item">
+          <span class="label">调度器</span>
+          <span class="value" id="schedulerStatus">--</span>
+        </div>
+        <div class="status-item">
+          <span class="label">任务数</span>
+          <span class="value" id="jobCount">--</span>
+        </div>
+        <div class="status-item">
+          <span class="label">累计触发</span>
+          <span class="value" id="triggerCount">--</span>
+        </div>
+        <div class="status-item">
+          <span class="label">成功/失败</span>
+          <span class="value" id="sendStats">--</span>
+        </div>
+      </div>
+      <div class="status-actions">
+        <button class="btn btn-sm" id="refreshStatusBtn">刷新状态</button>
+      </div>
+    </section>
+
+    <!-- 预览卡片 -->
+    <section class="card preview-card">
+      <h2>消息预览</h2>
+      <div class="preview-controls">
+        <div class="form-group">
+          <label>下线时间</label>
+          <input type="time" id="previewTime" value="23:00">
+        </div>
+        <div class="form-group">
+          <label>提前分钟</label>
+          <input type="number" id="previewAdvance" value="5" min="1" max="30">
+        </div>
+        <button class="btn btn-primary" id="previewBtn">生成预览</button>
+      </div>
+      <div class="preview-result" id="previewResult">
+        <div class="preview-placeholder">点击「生成预览」查看通知效果</div>
+      </div>
+    </section>
+
+    <!-- 测试发送卡片 -->
+    <section class="card test-card">
+      <h2>测试发送</h2>
+      <p class="hint">手动向指定群组发送一条测试通知</p>
+      <div class="test-controls">
+        <div class="form-group">
+          <label>目标群号</label>
+          <input type="text" id="testGroupId" placeholder="输入QQ群号">
+        </div>
+        <button class="btn btn-primary" id="testSendBtn">发送测试通知</button>
+      </div>
+      <div class="test-result" id="testResult"></div>
+    </section>
+
+    <!-- 任务列表 -->
+    <section class="card jobs-card">
+      <h2>定时任务列表</h2>
+      <div class="jobs-list" id="jobsList">
+        <div class="empty-state">点击「刷新状态」加载任务列表</div>
+      </div>
+    </section>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

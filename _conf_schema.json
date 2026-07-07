@@ -1,0 +1,205 @@
+{
+    "enable_notification": {
+        "description": "启用下线通知",
+        "type": "bool",
+        "default": true,
+        "hint": "关闭后将停止所有定时通知"
+    },
+    "global_advance_minutes": {
+        "description": "提前通知时间（分钟）",
+        "type": "int",
+        "default": 5,
+        "hint": "在下线前N分钟发送通知，范围 1-30",
+        "minimum": 1,
+        "maximum": 30
+    },
+    "schedules": {
+        "description": "定时通知计划",
+        "type": "list",
+        "hint": "配置不同日期的下线时间和通知规则",
+        "default": [
+            {
+                "name": "工作日下线",
+                "day_type": "weekday",
+                "offline_time": "23:00",
+                "advance_minutes": 5,
+                "enabled": true
+            },
+            {
+                "name": "周末下线",
+                "day_type": "weekend",
+                "offline_time": "23:20",
+                "advance_minutes": 5,
+                "enabled": true
+            }
+        ],
+        "items": {
+            "type": "object",
+            "description": "单个通知计划",
+            "items": {
+                "name": {
+                    "type": "string",
+                    "description": "计划名称",
+                    "default": "默认计划"
+                },
+                "day_type": {
+                    "type": "string",
+                    "description": "日期类型",
+                    "default": "everyday",
+                    "options": ["everyday", "weekday", "weekend", "specific"],
+                    "labels": ["每天", "工作日", "周末", "特定日期"]
+                },
+                "specific_days": {
+                    "type": "list",
+                    "description": "特定日期（当 day_type 为 specific 时生效）",
+                    "default": [],
+                    "hint": "填写星期几，如 [\"monday\", \"wednesday\", \"friday\"]",
+                    "items": {
+                        "type": "string",
+                        "description": "星期",
+                        "options": ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"],
+                        "labels": ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+                    }
+                },
+                "offline_time": {
+                    "type": "string",
+                    "description": "下线时间 (HH:MM)",
+                    "default": "23:00",
+                    "hint": "24小时制，如 22:30"
+                },
+                "advance_minutes": {
+                    "type": "int",
+                    "description": "提前通知分钟数",
+                    "default": 5,
+                    "hint": "覆盖全局设置，范围 1-30",
+                    "minimum": 1,
+                    "maximum": 30
+                },
+                "enabled": {
+                    "type": "bool",
+                    "description": "启用此计划",
+                    "default": true
+                }
+            }
+        }
+    },
+    "message_template": {
+        "description": "通知消息模板",
+        "type": "object",
+        "hint": "使用 {变量名} 插入动态内容",
+        "items": {
+            "title_template": {
+                "type": "string",
+                "description": "标题模板",
+                "default": "【AI服务下线通知】",
+                "hint": "可用变量: {time}, {date}, {day_of_week}, {countdown_minutes}"
+            },
+            "body_template": {
+                "type": "string",
+                "description": "正文模板",
+                "default": "各位成员请注意~\n\n{emoji} AI助手即将在 {time} 下线休息，预计还有 {countdown_minutes} 分钟。\n\n如有需要请尽快处理未完成的事项。\n明天见！晚安~",
+                "hint": "可用变量: {time}, {date}, {day_of_week}, {countdown_minutes}, {emoji}"
+            },
+            "emoji": {
+                "type": "string",
+                "description": "表情符号",
+                "default": "🌙",
+                "hint": "用于正文中的 {emoji} 变量"
+            },
+            "footer_template": {
+                "type": "string",
+                "description": "底部模板（可选）",
+                "default": "",
+                "hint": "留空则不显示，可用变量同正文"
+            }
+        }
+    },
+    "target_groups": {
+        "description": "目标通知群组",
+        "type": "list",
+        "hint": "填写需要接收通知的群号，留空则不发送",
+        "default": [],
+        "items": {
+            "type": "object",
+            "description": "群组配置",
+            "items": {
+                "group_id": {
+                    "type": "string",
+                    "description": "QQ群号",
+                    "default": ""
+                },
+                "group_name": {
+                    "type": "string",
+                    "description": "群名称（备注用）",
+                    "default": ""
+                },
+                "enabled": {
+                    "type": "bool",
+                    "description": "启用此群组通知",
+                    "default": true
+                }
+            }
+        }
+    },
+    "retry_config": {
+        "description": "发送失败重试配置",
+        "type": "object",
+        "hint": "消息发送失败时的重试策略",
+        "items": {
+            "max_retries": {
+                "type": "int",
+                "description": "最大重试次数",
+                "default": 3,
+                "hint": "每次重试间隔递增",
+                "minimum": 0,
+                "maximum": 10
+            },
+            "retry_interval_base": {
+                "type": "int",
+                "description": "重试基础间隔（秒）",
+                "default": 10,
+                "hint": "实际间隔 = 基础间隔 × 重试次数",
+                "minimum": 5,
+                "maximum": 120
+            }
+        }
+    },
+    "monitor_config": {
+        "description": "自我监控配置",
+        "type": "object",
+        "hint": "定时任务健康检查和告警",
+        "items": {
+            "enable_monitor": {
+                "type": "bool",
+                "description": "启用自我监控",
+                "default": true
+            },
+            "heartbeat_interval": {
+                "type": "int",
+                "description": "心跳检测间隔（秒）",
+                "default": 300,
+                "hint": "每N秒检查一次调度器状态",
+                "minimum": 60,
+                "maximum": 3600
+            },
+            "alert_admin_group": {
+                "type": "string",
+                "description": "告警通知群号",
+                "default": "",
+                "hint": "当调度器异常时向此群发送告警，留空则仅记录日志"
+            },
+            "alert_qq": {
+                "type": "string",
+                "description": "告警通知QQ号",
+                "default": "",
+                "hint": "当调度器异常时向此QQ号私聊发送告警，留空则不发送私聊告警"
+            }
+        }
+    },
+    "enable_manual_command": {
+        "description": "启用手动命令",
+        "type": "bool",
+        "default": true,
+        "hint": "允许通过 /下线通知 命令手动触发通知和预览"
+    }
+}

@@ -1,0 +1,24 @@
+name: astrbot_plugin_offline_notify
+display_name: AI下线通知系统
+desc: 定时向QQ群发送AI服务下线提醒，支持自定义通知内容、多群组、差异化时间等
+version: v1.0.0
+author: AstrBot User
+repo: https://github.com/astrbot/astrbot_plugin_offline_notify
+tags:
+  - 通知
+  - 定时任务
+  - 群管理
+compatibility:
+  min_astrbot_version: "4.0.0"
+platforms:
+  - aiocqhttp
+  - qq
+  - qq_official
+features:
+  - 可配置的定时下线通知
+  - 工作日/周末差异化时间
+  - 多群组同时通知
+  - 自定义消息模板
+  - 通知预览功能
+  - 发送失败重试机制
+  - 自我监控与告警
