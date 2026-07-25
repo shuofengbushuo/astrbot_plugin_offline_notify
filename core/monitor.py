@@ -29,8 +29,10 @@ class SchedulerMonitor:
         self.scheduler = scheduler
         self.enabled = config.get("enable_monitor", True)
         self.heartbeat_interval = config.get("heartbeat_interval", 300)
+        self.heartbeat_timeout = config.get("heartbeat_timeout", 180)
         self.alert_admin_group = config.get("alert_admin_group", "")
         self.alert_qq = config.get("alert_qq", "")
+        self.platform_id = config.get("platform_id", "小砂糖")
 
         self._task: Optional[asyncio.Task] = None
         self._running = False
@@ -91,10 +93,11 @@ class SchedulerMonitor:
 
         # 检查心跳年龄
         heartbeat_age = status.get("heartbeat_age")
-        if heartbeat_age is not None and heartbeat_age > self.heartbeat_interval * 3:
+        if heartbeat_age is not None and heartbeat_age > self.heartbeat_timeout:
             self._consecutive_failures += 1
             logger.error(
-                f"[离线通知] 调度器心跳超时: {heartbeat_age:.0f}s, "
+                f"[离线通知] 调度器心跳超时: {heartbeat_age:.0f}s "
+                f"(阈值 {self.heartbeat_timeout}s), "
                 f"连续失败: {self._consecutive_failures}"
             )
             await self._maybe_alert(
@@ -137,7 +140,7 @@ class SchedulerMonitor:
         # 发送告警到管理员群
         if self.alert_admin_group:
             try:
-                umo = f"default:GroupMessage:{self.alert_admin_group}"
+                umo = f"{self.platform_id}:GroupMessage:{self.alert_admin_group}"
                 chain = MessageChain().message(alert_text)
                 await self.context.send_message(umo, chain)
                 logger.info(
@@ -149,7 +152,7 @@ class SchedulerMonitor:
         # 发送告警到QQ私聊
         if self.alert_qq:
             try:
-                umo = f"default:FriendMessage:{self.alert_qq}"
+                umo = f"{self.platform_id}:FriendMessage:{self.alert_qq}"
                 chain = MessageChain().message(alert_text)
                 await self.context.send_message(umo, chain)
                 logger.info(

@@ -39,9 +39,10 @@
       </div>
     </section>
 
-    <!-- 预览卡片 -->
+    <!-- 预览卡片（模板） -->
     <section class="card preview-card">
-      <h2>消息预览</h2>
+      <h2>模板消息预览</h2>
+      <p class="hint">使用内置模板引擎生成的消息预览</p>
       <div class="preview-controls">
         <div class="form-group">
           <label>下线时间</label>
@@ -51,10 +52,38 @@
           <label>提前分钟</label>
           <input type="number" id="previewAdvance" value="5" min="1" max="30">
         </div>
-        <button class="btn btn-primary" id="previewBtn">生成预览</button>
+        <button class="btn btn-primary" id="previewBtn">模板预览</button>
       </div>
       <div class="preview-result" id="previewResult">
-        <div class="preview-placeholder">点击「生成预览」查看通知效果</div>
+        <div class="preview-placeholder">点击「模板预览」查看模板消息效果</div>
+      </div>
+    </section>
+
+    <!-- LLM 生成预览 -->
+    <section class="card llm-preview-card">
+      <h2>LLM 生成预览</h2>
+      <p class="hint">调用对话模型实时生成一条多样化的下线通知</p>
+      <div class="preview-controls">
+        <div class="form-group">
+          <label>下线时间</label>
+          <input type="time" id="llmPreviewTime" value="23:00">
+        </div>
+        <div class="form-group">
+          <label>提前分钟</label>
+          <input type="number" id="llmPreviewAdvance" value="5" min="0" max="30">
+        </div>
+        <div class="form-group">
+          <label>浮动范围(分钟)</label>
+          <input type="number" id="llmPreviewFloat" value="2" min="0" max="10">
+        </div>
+        <button class="btn btn-accent" id="llmPreviewBtn">LLM 生成</button>
+      </div>
+      <div class="llm-preview-result" id="llmPreviewResult">
+        <div class="preview-placeholder">点击「LLM 生成」查看对话模型实时生成的通知内容</div>
+      </div>
+      <div class="llm-preview-meta" id="llmPreviewMeta" style="display:none;">
+        <span class="source-tag" id="llmSourceTag"></span>
+        <span class="time-info" id="llmTimeInfo"></span>
       </div>
     </section>
 
@@ -77,6 +106,34 @@
       <h2>定时任务列表</h2>
       <div class="jobs-list" id="jobsList">
         <div class="empty-state">点击「刷新状态」加载任务列表</div>
+      </div>
+    </section>
+
+    <!-- 通知发布记录 -->
+    <section class="card records-card">
+      <h2>通知发布记录</h2>
+      <p class="hint">查看最近的通知发送历史</p>
+      <div class="records-toolbar">
+        <button class="btn btn-sm" id="refreshRecordsBtn">刷新记录</button>
+        <span class="records-count" id="recordsCount"></span>
+      </div>
+      <div class="records-table-wrapper">
+        <table class="records-table" id="recordsTable">
+          <thead>
+            <tr>
+              <th>时间</th>
+              <th>计划</th>
+              <th>下线时间</th>
+              <th>提前</th>
+              <th>浮动</th>
+              <th>来源</th>
+              <th>发送结果</th>
+            </tr>
+          </thead>
+          <tbody id="recordsBody">
+            <tr><td colspan="7" class="empty-state">点击「刷新记录」加载历史记录</td></tr>
+          </tbody>
+        </table>
       </div>
     </section>
   </div>

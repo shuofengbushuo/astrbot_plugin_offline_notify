@@ -9,9 +9,17 @@
         "description": "提前通知时间（分钟）",
         "type": "int",
         "default": 5,
-        "hint": "在下线前N分钟发送通知，范围 1-30",
-        "minimum": 1,
+        "hint": "在下线前N分钟发送通知，范围 0-30。设为 0 则在下线时间准时发送",
+        "minimum": 0,
         "maximum": 30
+    },
+    "global_float_range": {
+        "description": "浮动范围（分钟）",
+        "type": "int",
+        "default": 2,
+        "hint": "通知实际触发时间在 advance_minutes 到 advance_minutes+float_range 之间随机浮动，避免所有通知集中发送。设为 0 则精确触发",
+        "minimum": 0,
+        "maximum": 10
     },
     "schedules": {
         "description": "定时通知计划",
@@ -71,9 +79,17 @@
                     "type": "int",
                     "description": "提前通知分钟数",
                     "default": 5,
-                    "hint": "覆盖全局设置，范围 1-30",
-                    "minimum": 1,
+                    "hint": "覆盖全局设置，范围 0-30",
+                    "minimum": 0,
                     "maximum": 30
+                },
+                "float_range": {
+                    "type": "int",
+                    "description": "浮动范围",
+                    "default": 0,
+                    "hint": "覆盖全局设置。设为 0 则使用全局浮动范围，设为 >0 则覆盖全局值",
+                    "minimum": 0,
+                    "maximum": 10
                 },
                 "enabled": {
                     "type": "bool",
@@ -111,6 +127,40 @@
                 "description": "底部模板（可选）",
                 "default": "",
                 "hint": "留空则不显示，可用变量同正文"
+            }
+        }
+    },
+    "llm_generation_config": {
+        "description": "LLM 通知内容生成配置",
+        "type": "object",
+        "hint": "调用对话模型生成多样化、自然的下线通知内容，关闭则使用模板引擎",
+        "items": {
+            "enable_llm_generation": {
+                "type": "bool",
+                "description": "启用 LLM 生成通知",
+                "default": true,
+                "hint": "开启后使用对话模型生成通知内容，关闭则使用下方的消息模板"
+            },
+            "llm_provider_id": {
+                "type": "string",
+                "description": "LLM 提供商",
+                "default": "",
+                "hint": "选择用于生成通知内容的对话模型",
+                "_special": "select_provider"
+            },
+            "llm_timeout": {
+                "type": "int",
+                "description": "LLM 调用超时（秒）",
+                "default": 15,
+                "hint": "LLM 生成通知的最大等待时间，范围 5-60",
+                "minimum": 5,
+                "maximum": 60
+            },
+            "fallback_to_template": {
+                "type": "bool",
+                "description": "失败时回退到模板",
+                "default": true,
+                "hint": "LLM 生成失败（超时/异常）时，自动使用消息模板作为备用"
             }
         }
     },

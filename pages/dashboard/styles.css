@@ -129,7 +129,140 @@ body {
   background: #e2e8f0;
 }
 
-/* ── Form Controls ──────────────────────── */
+.btn-accent {
+  background: #0ea5e9;
+  color: #fff;
+}
+
+.btn-accent:hover {
+  background: #0284c7;
+}
+
+.btn-accent:disabled {
+  background: #7dd3fc;
+  cursor: not-allowed;
+}
+
+/* ── LLM Preview ────────────────────────── */
+.llm-preview-card h2 {
+  border-bottom-color: #0ea5e9;
+}
+
+.llm-preview-result {
+  padding: 16px;
+  background: #f0f9ff;
+  border: 1px solid #bae6fd;
+  border-radius: 8px;
+  white-space: pre-wrap;
+  font-size: 14px;
+  line-height: 1.8;
+  min-height: 60px;
+}
+
+.llm-preview-meta {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-top: 10px;
+  font-size: 12px;
+}
+
+.source-tag {
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-weight: 500;
+  font-size: 11px;
+}
+
+.source-tag.llm {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.source-tag.template {
+  background: #fef3c7;
+  color: #b45309;
+}
+
+.time-info {
+  color: #7f8c8d;
+}
+
+/* ── Records Table ─────────────────────── */
+.records-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.records-count {
+  color: #7f8c8d;
+  font-size: 13px;
+}
+
+.records-table-wrapper {
+  overflow-x: auto;
+}
+
+.records-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.records-table th {
+  text-align: left;
+  padding: 8px 10px;
+  background: #f8f9fa;
+  border-bottom: 2px solid #e9ecef;
+  color: #495057;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.records-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid #f1f3f5;
+  color: #2c3e50;
+  white-space: nowrap;
+}
+
+.records-table tr:hover td {
+  background: #f8f9ff;
+}
+
+.records-table .float-cell {
+  color: #0ea5e9;
+  font-weight: 500;
+}
+
+.records-table .source-llm {
+  color: #1d4ed8;
+  background: #dbeafe;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+}
+
+.records-table .source-template {
+  color: #b45309;
+  background: #fef3c7;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+}
+
+.records-table .result-ok {
+  color: #16a34a;
+}
+
+.records-table .result-fail {
+  color: #dc2626;
+}
+
 .form-group {
   display: flex;
   flex-direction: column;

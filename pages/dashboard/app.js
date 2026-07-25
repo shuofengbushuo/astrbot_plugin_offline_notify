@@ -22,6 +22,16 @@ const $previewAdvance = $("#previewAdvance");
 const $previewBtn = $("#previewBtn");
 const $previewResult = $("#previewResult");
 
+// LLM Preview
+const $llmPreviewTime = $("#llmPreviewTime");
+const $llmPreviewAdvance = $("#llmPreviewAdvance");
+const $llmPreviewFloat = $("#llmPreviewFloat");
+const $llmPreviewBtn = $("#llmPreviewBtn");
+const $llmPreviewResult = $("#llmPreviewResult");
+const $llmPreviewMeta = $("#llmPreviewMeta");
+const $llmSourceTag = $("#llmSourceTag");
+const $llmTimeInfo = $("#llmTimeInfo");
+
 // Test
 const $testGroupId = $("#testGroupId");
 const $testSendBtn = $("#testSendBtn");
@@ -29,6 +39,11 @@ const $testResult = $("#testResult");
 
 // Jobs
 const $jobsList = $("#jobsList");
+
+// Records
+const $refreshRecordsBtn = $("#refreshRecordsBtn");
+const $recordsCount = $("#recordsCount");
+const $recordsBody = $("#recordsBody");
 
 // Toast
 const $toast = $("#toast");
@@ -162,6 +177,53 @@ async function previewMessage() {
   }
 }
 
+// ── LLM 生成预览 ──────────────────────────────────
+
+async function llmPreviewMessage() {
+  const offlineTime = $llmPreviewTime.value || "23:00";
+  const advance = parseInt($llmPreviewAdvance.value) || 5;
+  const floatRange = parseInt($llmPreviewFloat.value) || 0;
+
+  $llmPreviewBtn.disabled = true;
+  $llmPreviewBtn.textContent = "生成中...";
+  $llmPreviewResult.innerHTML = '<div class="preview-placeholder">正在调用 LLM 生成通知...</div>';
+  $llmPreviewMeta.style.display = "none";
+
+  const data = await apiPost("/generate", {
+    offline_time: offlineTime,
+    countdown_minutes: advance,
+  });
+
+  $llmPreviewBtn.disabled = false;
+  $llmPreviewBtn.textContent = "LLM 生成";
+
+  if (data && data.success && data.data) {
+    const { text, source, avg_time_ms } = data.data;
+    let floatInfo = "";
+    if (floatRange > 0) {
+      floatInfo = `\n<i>浮动范围: ±${floatRange} 分钟</i>`;
+    }
+    $llmPreviewResult.innerHTML = `<div class="preview-message">${escapeHtml(text)}${floatInfo}</div>`;
+
+    // 显示元信息
+    $llmPreviewMeta.style.display = "flex";
+    if (source === "llm") {
+      $llmSourceTag.textContent = "LLM 生成";
+      $llmSourceTag.className = "source-tag llm";
+    } else {
+      $llmSourceTag.textContent = `模板回退 (${data.data.error || ""})`;
+      $llmSourceTag.className = "source-tag template";
+    }
+    $llmTimeInfo.textContent = avg_time_ms ? `平均耗时 ${avg_time_ms}ms` : "";
+    showToast(source === "llm" ? "LLM 生成成功" : "LLM 失败，已回退模板", source === "llm" ? "success" : "info");
+  } else {
+    $llmPreviewResult.innerHTML =
+      '<div class="preview-placeholder" style="color:#dc2626">LLM 生成失败</div>';
+    $llmPreviewMeta.style.display = "none";
+    showToast("LLM 生成失败", "error");
+  }
+}
+
 // ── 测试发送 ──────────────────────────────────────
 
 async function testSend() {
@@ -192,6 +254,69 @@ async function testSend() {
   }
 }
 
+// ── 通知记录查询 ────────────────────────────────
+
+async function refreshRecords() {
+  $refreshRecordsBtn.disabled = true;
+  $refreshRecordsBtn.textContent = "加载中...";
+
+  const data = await apiGet("/records?limit=20");
+
+  $refreshRecordsBtn.disabled = false;
+  $refreshRecordsBtn.textContent = "刷新记录";
+
+  if (data && data.success && data.data) {
+    renderRecords(data.data.records, data.data.total);
+    showToast("记录已刷新", "success");
+  }
+}
+
+function renderRecords(records, total) {
+  $recordsCount.textContent = `共 ${total} 条记录`;
+
+  if (!records || records.length === 0) {
+    $recordsBody.innerHTML = '<tr><td colspan="7" class="empty-state">暂无通知发布记录</td></tr>';
+    return;
+  }
+
+  $recordsBody.innerHTML = records
+    .map((r) => {
+      const dt = r.datetime || "未知";
+      const name = escapeHtml(r.schedule_name || "未知");
+      const offline = r.offline_time || "?";
+      const actual = r.actual_trigger_minutes || "?";
+      const floatS = r.float_seconds || 0;
+      const source = r.message_source || "template";
+      const results = r.results || {};
+      const successCount = (results.success || []).length;
+      const failedCount = (results.failed || []).length;
+
+      const floatCell = floatS > 0
+        ? `<span class="float-cell">${floatS}s</span>`
+        : '<span style="color:#7f8c8d">精确</span>';
+
+      const sourceCell = source === "llm"
+        ? '<span class="source-llm">LLM</span>'
+        : '<span class="source-template">模板</span>';
+
+      let resultCell = `<span class="result-ok">成功 ${successCount}</span>`;
+      if (failedCount > 0) {
+        resultCell += ` / <span class="result-fail">失败 ${failedCount}</span>`;
+      }
+
+      return `<tr>
+        <td>${dt}</td>
+        <td>${name}</td>
+        <td>${offline}</td>
+        <td>${actual}min</td>
+        <td>${floatCell}</td>
+        <td>${sourceCell}</td>
+        <td>${resultCell}</td>
+      </tr>`;
+    })
+    .join("");
+}
+
 // ── 工具函数 ──────────────────────────────────────
 
 function escapeHtml(str) {
@@ -204,7 +329,9 @@ function escapeHtml(str) {
 
 $refreshStatusBtn.addEventListener("click", refreshStatus);
 $previewBtn.addEventListener("click", previewMessage);
+$llmPreviewBtn.addEventListener("click", llmPreviewMessage);
 $testSendBtn.addEventListener("click", testSend);
+$refreshRecordsBtn.addEventListener("click", refreshRecords);
 
 // 回车触发测试发送
 $testGroupId.addEventListener("keydown", (e) => {
@@ -217,4 +344,5 @@ $testGroupId.addEventListener("keydown", (e) => {
 
 document.addEventListener("DOMContentLoaded", () => {
   refreshStatus();
+  refreshRecords();
 });

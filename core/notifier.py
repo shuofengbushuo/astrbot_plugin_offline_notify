@@ -30,13 +30,13 @@ class GroupNotifier:
         }
 
     async def send_to_group(self, group_id: str, message: str,
-                            platform_id: str = "default") -> bool:
+                            platform_id: str = "小砂糖") -> bool:
         """向单个群组发送消息（带重试）
 
         Args:
             group_id: QQ群号
             message: 消息内容
-            platform_id: 平台标识，默认 "default"
+            platform_id: 平台实例名称（如"小砂糖"），用于构造 UMO
 
         Returns:
             bool: 是否发送成功
@@ -72,7 +72,7 @@ class GroupNotifier:
         return False
 
     async def send_to_groups(self, target_groups: List[dict],
-                             message: str, platform_id: str = "default") -> dict:
+                             message: str, platform_id: str = "小砂糖") -> dict:
         """向多个群组发送消息
 
         Args:

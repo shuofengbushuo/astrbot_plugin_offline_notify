@@ -28,7 +28,7 @@ class TemplateEngine:
         """
         self.title_template = config.get("title_template", "【AI服务下线通知】")
         self.body_template = config.get("body_template",
-            "各位成员请注意~\n\n{emoji} AI助手即将在 {time} 下线休息，"
+            "猪猪们~\n\n{emoji} AI助手即将在 {time} 下线休息，"
             "预计还有 {countdown_minutes} 分钟。\n\n如有需要请尽快处理未完成的事项。\n明天见！晚安~")
         self.footer_template = config.get("footer_template", "")
         self.emoji = config.get("emoji", "🌙")
