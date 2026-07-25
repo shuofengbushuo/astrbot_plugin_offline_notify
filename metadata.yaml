@@ -3,7 +3,7 @@ display_name: AI下线通知系统
 desc: 定时向QQ群发送AI服务下线提醒，支持LLM生成多样化通知、浮动时间、多群组、发布记录查询、管理员手动生成等
 version: v1.3.0
 author: AstrBot User
-repo: https://github.com/astrbot/astrbot_plugin_offline_notify
+repo: https://github.com/shuofengbushuo/astrbot_plugin_offline_notify
 tags:
   - 通知
   - 定时任务
