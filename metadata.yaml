@@ -1,7 +1,7 @@
 name: astrbot_plugin_offline_notify
 display_name: AI下线通知系统
-desc: 定时向QQ群发送AI服务下线提醒，支持LLM生成多样化通知、浮动时间、多群组、发布记录查询、管理员手动生成等
-version: v1.3.0
+desc: 定时向QQ群发送AI服务下线提醒，支持LLM以16岁真人女孩「砂糖」人设生成自然道别通知（规避AI/系统口吻与「XX:XX下线」字眼）、浮动时间、多群组、发布记录查询、管理员手动生成、提示词明置编辑与多套命名方案互不干扰切换等，长通知自动按句分段发送（不依赖splitter插件）
+version: v1.5.0
 author: AstrBot User
 repo: https://github.com/shuofengbushuo/astrbot_plugin_offline_notify
 tags:
@@ -27,3 +27,6 @@ features:
   - 调度器心跳检测
   - 通知发布记录持久化存储与查询
   - 管理员私聊手动生成并发送通知到指定群
+  - 长通知自动按句分段发送（自带分段，不依赖splitter插件，语义不丢失）
+  - LLM通知以16岁真人女孩「砂糖」人设生成自然道别，规避AI/系统口吻与「XX:XX下线」字眼（昼夜自动切换睡觉/有事），自动按句分段
+  - 提示词明置：配置项可自定义提示词，命名方案库支持多套提示词独立保存/切换/删除（三级优先级：激活方案>配置>内置默认）

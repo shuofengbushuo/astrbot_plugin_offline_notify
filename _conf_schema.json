@@ -113,7 +113,7 @@
             "body_template": {
                 "type": "string",
                 "description": "正文模板",
-                "default": "各位成员请注意~\n\n{emoji} AI助手即将在 {time} 下线休息，预计还有 {countdown_minutes} 分钟。\n\n如有需要请尽快处理未完成的事项。\n明天见！晚安~",
+                "default": "注意~{emoji} 小砂糖即将下线休息，明天见！晚安~",
                 "hint": "可用变量: {time}, {date}, {day_of_week}, {countdown_minutes}, {emoji}"
             },
             "emoji": {
@@ -150,17 +150,51 @@
             },
             "llm_timeout": {
                 "type": "int",
-                "description": "LLM 调用超时（秒）",
+                "description": "LLM 单次调用超时（秒，内部封顶 40~240）",
                 "default": 15,
-                "hint": "LLM 生成通知的最大等待时间，范围 5-60",
+                "hint": "LLM 生成通知的单次最大等待时间（插件内部会封顶为 40~240s）。由于已默认关闭 DeepSeek 思考模式，正常几秒即可完成，此值主要用于兜底。",
                 "minimum": 5,
                 "maximum": 60
+            },
+            "llm_disable_thinking": {
+                "type": "bool",
+                "description": "关闭 DeepSeek 思考模式（大幅提速）",
+                "default": true,
+                "hint": "deepseek-v4 系列默认开启「思考/推理」，模型会先花十几秒 reasoning 才吐字，导致通知生成耗时 20s+。开启后仅对本次插件调用临时关闭思考模式（等同旧 deepseek-chat 的非思考路径），耗时降到几秒，且不影响普通聊天。"
+            },
+            "llm_max_retry": {
+                "type": "int",
+                "description": "LLM 调用重试次数",
+                "default": 2,
+                "hint": "首次超时（多半是 AStrBot 的 LLM provider 注册表正在重连）后，等待 llm_retry_delay 秒再试的次数。设为 0 则只试一次不重试",
+                "minimum": 0,
+                "maximum": 5
+            },
+            "llm_retry_delay": {
+                "type": "int",
+                "description": "LLM 重试前等待（秒）",
+                "default": 3,
+                "hint": "每次重试前等待的秒数，给 AStrBot 的 provider 注册表恢复时间",
+                "minimum": 1,
+                "maximum": 30
             },
             "fallback_to_template": {
                 "type": "bool",
                 "description": "失败时回退到模板",
                 "default": true,
                 "hint": "LLM 生成失败（超时/异常）时，自动使用消息模板作为备用"
+            },
+            "custom_builtin_prompt": {
+                "type": "string",
+                "description": "自定义·自动通知提示词",
+                "default": "",
+                "hint": "【明置编辑】留空则使用内置「砂糖」默认提示词。填写后覆盖默认，用于自动调度触发的下线通知。支持占位符：{date} {day_of_week} {time_context} {offline_time} {countdown_minutes}。多套提示词可用 /下线通知 提示词 命令存成命名方案、互不干扰地切换。"
+            },
+            "custom_manual_prompt": {
+                "type": "string",
+                "description": "自定义·手动生成提示词",
+                "default": "",
+                "hint": "【明置编辑】留空则使用内置「砂糖」默认提示词。填写后覆盖默认，用于 /下线通知 生成 手动触发场景。支持占位符同上。"
             }
         }
     },

@@ -105,10 +105,13 @@ class TemplateEngine:
             str: 完整的通知消息
         """
         rendered = self.render(offline_time, countdown_minutes, now)
-        parts = [rendered["title"], "", rendered["body"]]
-        if rendered["footer"]:
-            parts.extend(["", rendered["footer"]])
-        return "\n".join(parts)
+        # 仅拼接非空部分，避免空标题/底部产生多余换行，
+        # 保证模板回复是干净的单条纯文本。
+        parts = [p for p in (rendered["title"], rendered["body"], rendered["footer"]) if p]
+        message = "\n".join(parts)
+        # 模板回复作为单条纯文本发送，不做任何分段/规范化处理，
+        # 保持配置中写好的原样（含句末标点也原样一条送达）。
+        return message
 
     @staticmethod
     def _replace_vars(template: str, variables: dict) -> str:

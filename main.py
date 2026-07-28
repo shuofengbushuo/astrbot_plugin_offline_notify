@@ -20,6 +20,7 @@ AI下线通知系统 - AstrBot 插件主入口
   /下线通知 测试     - 手动触发一次测试通知
   /下线通知 统计     - 查看发送统计和通知历史
   /下线通知 记录 [N] - 查看最近 N 条通知发布记录
+  /下线通知 提示词   - 管理提示词方案（保存/切换/查看/删除，多套互不干扰）
 """
 
 import asyncio
@@ -29,14 +30,15 @@ from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.api import logger, AstrBotConfig
 
 from .core import (NotificationScheduler, GroupNotifier, TemplateEngine,
-                   SchedulerMonitor, LLMGenerator, RecordStore)
+                   SchedulerMonitor, LLMGenerator, RecordStore, PromptStore)
+from .core.notifier import split_long_message, SEGMENT_SEND_INTERVAL
 
 
 @register(
     "astrbot_plugin_offline_notify",
     "AstrBot User",
     "定时向QQ群发送AI服务下线提醒，支持LLM生成多样化通知、浮动时间、多群组等",
-    "v1.3.0",
+    "v1.5.0",
     "https://github.com/astrbot/astrbot_plugin_offline_notify"
 )
 class OfflineNotifyPlugin(Star):
@@ -54,6 +56,7 @@ class OfflineNotifyPlugin(Star):
         self.notifier: GroupNotifier = None
         self.monitor: SchedulerMonitor = None
         self.record_store: RecordStore = None
+        self.prompt_store: PromptStore = None
 
         # 获取插件数据目录
         self.plugin_data_dir = StarTools.get_data_dir("astrbot_plugin_offline_notify")
@@ -70,10 +73,14 @@ class OfflineNotifyPlugin(Star):
         # 初始化模板引擎（始终初始化，作为回退方案）
         self.template_engine = TemplateEngine(self.config.get("message_template", {}))
 
-        # 初始化 LLM 生成器
+        # 初始化提示词方案库（命名方案，互不干扰地保存 / 切换）
+        self.prompt_store = PromptStore(self.plugin_data_dir)
+
+        # 初始化 LLM 生成器（传入方案库，支持「激活方案 > 配置自定义 > 内置默认」三级覆盖）
         self.llm_generator = LLMGenerator(
             self.context,
-            self.config.get("llm_generation_config", {})
+            self.config.get("llm_generation_config", {}),
+            prompt_store=self.prompt_store
         )
 
         # 初始化通知器
@@ -155,9 +162,9 @@ class OfflineNotifyPlugin(Star):
     def _detect_message_source(self) -> str:
         """检测本次通知的消息来源"""
         if self.llm_generator.enabled and self.llm_generator.provider_id:
-            stats = self.llm_generator.get_stats()
-            # 如果最近一次 LLM 调用是成功的，则为 llm 来源
-            if stats.get("last_error") is None:
+            # 以最近一次 LLM 调用是否真正成功产出内容为准，
+            # 而不是仅看 last_error 是否为空（旧逻辑会在一次成功后永远误判为 llm）
+            if self.llm_generator.get_stats().get("last_success"):
                 return "llm"
         return "template"
 
@@ -202,8 +209,11 @@ class OfflineNotifyPlugin(Star):
             return
 
         # 发送通知
+        # 模板回复（source != llm）作为单条纯文本发送，不分段；
+        # LLM 长通知才按句分段。
         result = await self.notifier.send_to_groups(
-            target_groups, message, self.platform_id
+            target_groups, message, self.platform_id,
+            split=(message_source == "llm"),
         )
 
         # 写入通知记录
@@ -319,21 +329,15 @@ class OfflineNotifyPlugin(Star):
         私聊模式: /下线通知 生成 [QQ群号] → 管理员专用，生成并发送到指定群
           示例: /下线通知 生成 1006930720
         """
-        # ── 前置检查：LLM 可用性 ──
-        if not self.llm_generator.enabled:
-            yield event.plain_result("❌ LLM 生成功能已禁用，请先在配置中启用")
-            return
-        if not self.llm_generator.provider_id:
-            yield event.plain_result("❌ 未配置 LLM 提供商，请先在配置中选择")
-            return
-
         # ── 解析命令参数 ──
+        # 说明：LLM 禁用或不可用时，本命令会自动回退到模板引擎
+        # （预览 / 生成 / 发送模板通知），不再直接报错退出。
         message_str = event.message_str
         parts = message_str.strip().split()
         group_id = event.get_group_id()
 
         if group_id:
-            # ── 群聊模式：仅预览 ──
+            # ── 群聊模式：仅预览（LLM 优先，禁用/失败则预览模板） ──
             now = datetime.now()
             schedules = self.config.get("schedules", [])
             offline_time = "23:00"
@@ -345,20 +349,27 @@ class OfflineNotifyPlugin(Star):
                                         self.config.get("global_advance_minutes", 5))
                     break
 
-            yield event.plain_result("正在调用 LLM 生成通知...")
+            if self.llm_generator.enabled and self.llm_generator.provider_id:
+                yield event.plain_result("正在调用 LLM 生成通知...")
+                result = await self.llm_generator.generate(offline_time, advance, now)
+                if result:
+                    llm_stats = self.llm_generator.get_stats()
+                    yield event.plain_result(
+                        f"【LLM 生成结果】\n"
+                        f"下线时间: {offline_time} | 提前: {advance} 分钟 | "
+                        f"耗时: {llm_stats['avg_time_ms']}ms\n\n{result}"
+                    )
+                    return
+                else:
+                    last_error = self.llm_generator.get_stats().get("last_error", "未知错误")
+                    yield event.plain_result(
+                        f"⚠️ LLM 生成失败，已自动回退到模板预览。\n"
+                        f"失败原因：{last_error}"
+                    )
 
-            result = await self.llm_generator.generate(offline_time, advance, now)
-
-            if result:
-                llm_stats = self.llm_generator.get_stats()
-                yield event.plain_result(
-                    f"【LLM 生成结果】\n"
-                    f"下线时间: {offline_time} | 提前: {advance} 分钟 | "
-                    f"耗时: {llm_stats['avg_time_ms']}ms\n\n{result}"
-                )
-            else:
-                last_error = self.llm_generator.get_stats().get("last_error", "未知错误")
-                yield event.plain_result(f"❌ LLM 生成失败: {last_error}")
+            # LLM 禁用或失败 → 模板预览
+            template_msg = self.template_engine.build_full_message(offline_time, advance)
+            yield event.plain_result(f"【模板预览】\n{template_msg}")
 
         else:
             # ── 私聊模式：发送到指定群 ──
@@ -388,20 +399,34 @@ class OfflineNotifyPlugin(Star):
                 )
                 return
 
-            # 3. 生成通知
+            # 3. 生成通知（LLM 优先，禁用/失败回退模板引擎）
             now = datetime.now()
             offline_time = now.strftime("%H:%M")
 
-            yield event.plain_result(
-                f"正在调用 LLM 生成通知，目标群: {target_group_id}..."
-            )
-
-            result = await self.llm_generator.generate(offline_time, 5, now, is_manual=True)
-
-            if not result:
-                # LLM 失败，回退到模板
-                logger.warning(
-                    f"[离线通知] 手动生成 LLM 失败，回退模板，"
+            if self.llm_generator.enabled and self.llm_generator.provider_id:
+                yield event.plain_result(
+                    f"正在调用 LLM 生成通知，目标群: {target_group_id}..."
+                )
+                result = await self.llm_generator.generate(
+                    offline_time, 5, now, is_manual=True
+                )
+                if not result:
+                    # LLM 失败，回退到模板，并在回复中展示诊断原因
+                    gen_stats = self.llm_generator.get_stats()
+                    last_error = gen_stats.get("last_error", "未知错误")
+                    stage = gen_stats.get("stage", "unknown")
+                    logger.warning(
+                        f"[离线通知] 手动生成 LLM 失败，回退模板，"
+                        f"目标群: {target_group_id}，stage={stage}"
+                    )
+                    yield event.plain_result(
+                        f"⚠️ LLM 生成失败（{last_error}），已自动回退模板。"
+                    )
+                    result = self.template_engine.build_full_message(offline_time, 5)
+            else:
+                # LLM 已禁用 → 直接使用模板引擎
+                logger.info(
+                    f"[离线通知] LLM 已禁用，使用模板引擎生成，"
                     f"目标群: {target_group_id}"
                 )
                 result = self.template_engine.build_full_message(offline_time, 5)
@@ -411,21 +436,28 @@ class OfflineNotifyPlugin(Star):
                 return
 
             # 4. 发送到指定群
+            # 模板回复（LLM 失败回退）作为单条纯文本发送，不分段；
+            # LLM 成功生成的长通知才按句分段。
+            source = self._detect_message_source()
             logger.info(
                 f"[离线通知] 管理员手动发送通知到群 {target_group_id}，"
-                f"内容长度: {len(result)} 字符"
+                f"内容长度: {len(result)} 字符，来源: {source}"
             )
 
             success = await self.notifier.send_to_group(
-                target_group_id, result, self.platform_id
+                target_group_id, result, self.platform_id,
+                split=(source == "llm"),
             )
 
             if success:
-                llm_stats = self.llm_generator.get_stats()
+                if source == "llm":
+                    llm_stats = self.llm_generator.get_stats()
+                    time_info = f"耗时: {llm_stats['avg_time_ms']}ms"
+                else:
+                    time_info = "来源: 模板引擎（LLM 已禁用/失败，已自动回退）"
                 yield event.plain_result(
                     f"✅ 通知已成功发送到群 {target_group_id}\n"
-                    f"下线时间: {offline_time} | "
-                    f"耗时: {llm_stats['avg_time_ms']}ms\n\n"
+                    f"下线时间: {offline_time} | {time_info}\n\n"
                     f"── 已发送内容 ──\n{result}"
                 )
             else:
@@ -444,10 +476,20 @@ class OfflineNotifyPlugin(Star):
         now = datetime.now()
         offline_time = now.strftime("%H:%M")
         message = await self._generate_message(offline_time, 5)
+        source = self._detect_message_source()
 
-        # 直接使用 event.send 发送到当前群，避免 UMO 格式问题
+        # 直接发送到当前群
+        # 模板回复（source != llm）作为单条纯文本发送，不分段；
+        # LLM 长通知才按句切分逐段发送（与群通知一致）。
         try:
-            await event.send(event.plain_result(message))
+            if source == "llm":
+                segments = split_long_message(message)
+                for idx, seg in enumerate(segments):
+                    await event.send(event.plain_result(seg))
+                    if idx < len(segments) - 1:
+                        await asyncio.sleep(SEGMENT_SEND_INTERVAL)
+            else:
+                await event.send(event.plain_result(message))
             yield event.plain_result("✅ 测试通知已发送到当前群")
         except Exception as e:
             logger.error(f"[离线通知] 测试通知发送失败: {e}", exc_info=True)
@@ -544,6 +586,154 @@ class OfflineNotifyPlugin(Star):
             lines.append(f"\n... 共 {total} 条记录，显示最近 {limit} 条")
 
         yield event.plain_result("\n".join(lines))
+
+    @offline_notify.command("提示词")
+    async def cmd_prompt(self, event: AstrMessageEvent):
+        """管理提示词方案（命名方案库，多套提示词互不干扰）
+
+        /下线通知 提示词              - 查看所有方案与当前生效来源
+        /下线通知 提示词 查看 <名称>   - 查看某方案的提示词内容
+        /下线通知 提示词 保存 <名称>   - 把当前生效的提示词存成命名方案
+        /下线通知 提示词 切换 <名称>   - 激活某方案（覆盖配置/默认）
+        /下线通知 提示词 默认          - 取消激活，回退到配置/内置默认
+        /下线通知 提示词 删除 <名称>   - 删除某方案
+
+        优先级：激活方案 > 配置自定义(custom_*_prompt) > 内置「砂糖」默认。
+        读取操作（列表/查看）开放；写操作（保存/切换/默认/删除）仅管理员。
+        """
+        message_str = event.message_str
+        parts = message_str.strip().split()
+        # parts[0]="下线通知" parts[1]="提示词" parts[2]=子命令 parts[3:]=参数
+        sub = parts[2] if len(parts) >= 3 else ""
+
+        def _effective_source() -> str:
+            active = self.prompt_store.get_active()
+            if active:
+                return f"命名方案「{active}」"
+            if self.llm_generator.custom_builtin or self.llm_generator.custom_manual:
+                return "配置自定义(custom_*_prompt)"
+            return "内置默认「砂糖」"
+
+        # ── 读操作：列表 / 查看，所有人可用 ──────────────
+        if sub in ("", "列表", "list"):
+            names = self.prompt_store.list_profiles()
+            active = self.prompt_store.get_active()
+            lines = [
+                "【提示词方案库】",
+                "",
+                f"当前生效来源: {_effective_source()}",
+                f"已保存方案: {len(names)} 个",
+            ]
+            if names:
+                lines.append("")
+                for n in names:
+                    mark = " ← 当前激活" if n == active else ""
+                    lines.append(f"  · {n}{mark}")
+            else:
+                lines.append("  （暂无命名方案，用「/下线通知 提示词 保存 <名称>」新建）")
+            lines.extend([
+                "",
+                "用法:",
+                "  /下线通知 提示词 查看 <名称>",
+                "  /下线通知 提示词 保存 <名称>",
+                "  /下线通知 提示词 切换 <名称>",
+                "  /下线通知 提示词 默认",
+                "  /下线通知 提示词 删除 <名称>",
+            ])
+            yield event.plain_result("\n".join(lines))
+            return
+
+        if sub in ("查看", "view"):
+            if len(parts) < 4:
+                yield event.plain_result("❌ 请指定方案名：/下线通知 提示词 查看 <名称>")
+                return
+            name = " ".join(parts[3:])
+            prof = self.prompt_store.get_profile(name)
+            if not prof:
+                yield event.plain_result(
+                    f"❌ 方案「{name}」不存在\n"
+                    f"已有方案: {self.prompt_store.list_profiles() or '（无）'}"
+                )
+                return
+            lines = [
+                f"【方案「{name}」】",
+                "",
+                "── 自动通知提示词 (builtin) ──",
+                prof.get("builtin_prompt", "") or "（空）",
+                "",
+                "── 手动生成提示词 (manual) ──",
+                prof.get("manual_prompt", "") or "（空）",
+            ]
+            yield event.plain_result("\n".join(lines))
+            return
+
+        # ── 写操作：admin-only ──────────────────────────
+        if not event.is_admin():
+            sender = event.get_sender_name() or event.get_sender_id()
+            logger.warning(f"[离线通知] 非管理员 {sender} 尝试管理提示词方案")
+            yield event.plain_result("❌ 仅管理员可管理提示词方案（保存/切换/默认/删除）")
+            return
+
+        if sub in ("保存", "save"):
+            if len(parts) < 4:
+                yield event.plain_result("❌ 请指定方案名：/下线通知 提示词 保存 <名称>")
+                return
+            name = " ".join(parts[3:])
+            b_tpl, m_tpl = self.llm_generator.get_effective_prompts()
+            self.prompt_store.upsert(name, b_tpl, m_tpl)
+            yield event.plain_result(
+                f"✅ 已保存方案「{name}」\n"
+                f"（快照了当前生效的 builtin + manual 提示词，来源: {_effective_source()}）"
+            )
+            return
+
+        if sub in ("切换", "switch"):
+            if len(parts) < 4:
+                yield event.plain_result("❌ 请指定方案名：/下线通知 提示词 切换 <名称>")
+                return
+            name = " ".join(parts[3:])
+            if not self.prompt_store.get_profile(name):
+                yield event.plain_result(
+                    f"❌ 方案「{name}」不存在\n"
+                    f"已有方案: {self.prompt_store.list_profiles() or '（无）'}"
+                )
+                return
+            self.prompt_store.set_active(name)
+            yield event.plain_result(
+                f"✅ 已激活方案「{name}」，后续通知生成将使用它\n"
+                f"（优先级高于配置自定义与内置默认；用「/下线通知 提示词 默认」可回退）"
+            )
+            return
+
+        if sub in ("默认", "default"):
+            self.prompt_store.set_active(None)
+            yield event.plain_result(
+                "✅ 已取消激活方案，回退到配置自定义 / 内置「砂糖」默认提示词\n"
+                f"当前生效来源: {_effective_source()}"
+            )
+            return
+
+        if sub in ("删除", "delete"):
+            if len(parts) < 4:
+                yield event.plain_result("❌ 请指定方案名：/下线通知 提示词 删除 <名称>")
+                return
+            name = " ".join(parts[3:])
+            if self.prompt_store.delete(name):
+                yield event.plain_result(f"✅ 已删除方案「{name}」")
+            else:
+                yield event.plain_result(f"❌ 方案「{name}」不存在")
+            return
+
+        # 未知子命令 → 用法
+        yield event.plain_result(
+            "用法：\n"
+            "  /下线通知 提示词              查看所有方案\n"
+            "  /下线通知 提示词 查看 <名称>   查看某方案\n"
+            "  /下线通知 提示词 保存 <名称>   保存当前提示词为方案\n"
+            "  /下线通知 提示词 切换 <名称>   激活某方案\n"
+            "  /下线通知 提示词 默认          回退到默认\n"
+            "  /下线通知 提示词 删除 <名称>   删除某方案"
+        )
 
     # ── WebUI API ──────────────────────────────────────────
 
