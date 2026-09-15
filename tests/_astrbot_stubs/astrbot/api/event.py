@@ -26,8 +26,14 @@ class AstrMessageEvent:
 class MessageChain:
     def __init__(self, chain=None):
         self.chain = chain if chain is not None else []
+        # 与真实内核一致：None=跟随平台默认，True/False=强制 Markdown/纯文本
+        self.use_markdown_ = None
 
     def message(self, text):
         from astrbot.api.message_components import Plain
         self.chain = [Plain(text)]
+        return self
+
+    def use_markdown(self, use=True):
+        self.use_markdown_ = use
         return self

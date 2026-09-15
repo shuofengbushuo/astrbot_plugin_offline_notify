@@ -1,144 +1,192 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<html lang="zh-CN" data-page-node-id="Z3XZQHOveRfJDpG7nZ63e4">
+<head data-page-node-id="Zx3n0YpqwCUDdl9pU3o2Uo">
+  <meta charset="UTF-8" data-page-node-id="Y3EMEpWcV3XdfyUOFIpQkZ">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" data-page-node-id="CB7vrd2kJw0L4jAflWIdZM">
   <title>AI下线通知管理</title>
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="styles.css" data-page-node-id="Wfxgb0DGYe4RafzOX3iXxS">
 </head>
-<body>
-  <div class="container">
-    <header class="header">
-      <h1> AI下线通知系统</h1>
-      <p class="subtitle">定时向QQ群发送AI服务下线提醒</p>
+<body data-page-node-id="IMcZyiIfvTcVmxXKH47NOW">
+  <div class="container" data-page-node-id="E6OAsxsgOhfmqCRzxudUYl">
+    <header class="header" data-page-node-id="6dwFP0gTar4jKUiX0ZbV4I">
+      <h1 data-page-node-id="kOSox1OVclWCaZtACvWl7u"> AI下线通知系统</h1>
+      <p class="subtitle" data-page-node-id="NifVLHoGkfsEPGQvw25FfJ">定时向QQ群发送AI服务下线提醒</p>
     </header>
 
     <!-- 状态卡片 -->
-    <section class="card status-card" id="statusCard">
-      <h2>系统状态</h2>
-      <div class="status-grid">
-        <div class="status-item">
-          <span class="label">调度器</span>
-          <span class="value" id="schedulerStatus">--</span>
+    <section class="card status-card" id="statusCard" data-page-node-id="cPEOoc7RYiBhzUzAzdPLa1">
+      <h2 data-page-node-id="2cDanJlCXcCYaz1BhCKlrb">系统状态</h2>
+      <div class="status-grid" data-page-node-id="nYhwZRZjxgwCqKyf1qFx7W">
+        <div class="status-item" data-page-node-id="t85aOvoBMHl3vyWnMWmjkW">
+          <span class="label" data-page-node-id="8sQJarlqNvdL1R59vIHYxp">调度器</span>
+          <span class="value" id="schedulerStatus" data-page-node-id="mSB3mtO7LdYdIhMfkRyFkv">--</span>
         </div>
-        <div class="status-item">
-          <span class="label">任务数</span>
-          <span class="value" id="jobCount">--</span>
+        <div class="status-item" data-page-node-id="0vsdLkP8v9wbGVlpxeBzaF">
+          <span class="label" data-page-node-id="mL0BGPJdMtyGCT8eRn3F47">任务数</span>
+          <span class="value" id="jobCount" data-page-node-id="6AunmAOnCkh1E4VqJUcoil">--</span>
         </div>
-        <div class="status-item">
-          <span class="label">累计触发</span>
-          <span class="value" id="triggerCount">--</span>
+        <div class="status-item" data-page-node-id="OFdw7RKlfvetPikXvyrndM">
+          <span class="label" data-page-node-id="PP5Jm57kHxfSk5Ey8wQ92n">累计触发</span>
+          <span class="value" id="triggerCount" data-page-node-id="qlxy2PU3CzcQWHBgfrtEZo">--</span>
         </div>
-        <div class="status-item">
-          <span class="label">成功/失败</span>
-          <span class="value" id="sendStats">--</span>
+        <div class="status-item" data-page-node-id="zPuDl5tOB2WvHTCZ9qsxQ4">
+          <span class="label" data-page-node-id="PiymlNxItIUYnSIKkQoLDj">成功/失败</span>
+          <span class="value" id="sendStats" data-page-node-id="r58Zdi2nCLDHSNy9ues4Nh">--</span>
         </div>
       </div>
-      <div class="status-actions">
-        <button class="btn btn-sm" id="refreshStatusBtn">刷新状态</button>
+      <div class="status-actions" data-page-node-id="tpOr1DAuZFgbHLWP8y9RC3">
+        <button class="btn btn-sm" id="refreshStatusBtn" data-page-node-id="JXYG1zIYFZWekz9XwurxjJ">刷新状态</button>
       </div>
     </section>
 
     <!-- 预览卡片（模板） -->
-    <section class="card preview-card">
-      <h2>模板消息预览</h2>
-      <p class="hint">使用内置模板引擎生成的消息预览</p>
-      <div class="preview-controls">
-        <div class="form-group">
-          <label>下线时间</label>
-          <input type="time" id="previewTime" value="23:00">
+    <section class="card preview-card" data-page-node-id="kgjmNkaaNhMRpSFjoH7h2G">
+      <h2 data-page-node-id="StqNh5MpAKxdlZrrEkwbIr">模板消息预览</h2>
+      <p class="hint" data-page-node-id="ISCwk0pjCFNsVOJupHwm6m">使用内置模板引擎生成的消息预览</p>
+      <div class="preview-controls" data-page-node-id="BEB4TEDpSj0wPlC7xobHPb">
+        <div class="form-group" data-page-node-id="b59GqIMWMkPLMvGBAalNAD">
+          <label data-page-node-id="tStWvsJrKSKJYCIwBBuXq5">下线时间</label>
+          <input type="time" id="previewTime" value="23:00" data-page-node-id="Zanz8XcdvRpR1VASN2SDlD">
         </div>
-        <div class="form-group">
-          <label>提前分钟</label>
-          <input type="number" id="previewAdvance" value="5" min="1" max="30">
+        <div class="form-group" data-page-node-id="KXNdWLKoYDV5OgzfzvBF8t">
+          <label data-page-node-id="ZsdEJSHTJCD2mjuYrjBCAP">提前分钟</label>
+          <input type="number" id="previewAdvance" value="5" min="1" max="30" data-page-node-id="n9eDLHbu0FdNRlG6GCifbe">
         </div>
-        <button class="btn btn-primary" id="previewBtn">模板预览</button>
+        <button class="btn btn-primary" id="previewBtn" data-page-node-id="FcNLGdeKWB94gEYedKEn4p">模板预览</button>
       </div>
-      <div class="preview-result" id="previewResult">
-        <div class="preview-placeholder">点击「模板预览」查看模板消息效果</div>
+      <div class="preview-result" id="previewResult" data-page-node-id="0yCUDKGRrdP9j9x1ShOcow">
+        <div class="preview-placeholder" data-page-node-id="A7IcqEWLTf19jbi1nkxmgc">点击「模板预览」查看模板消息效果</div>
       </div>
     </section>
 
     <!-- LLM 生成预览 -->
-    <section class="card llm-preview-card">
-      <h2>LLM 生成预览</h2>
-      <p class="hint">调用对话模型实时生成一条多样化的下线通知</p>
-      <div class="preview-controls">
-        <div class="form-group">
-          <label>下线时间</label>
-          <input type="time" id="llmPreviewTime" value="23:00">
+    <section class="card llm-preview-card" data-page-node-id="7PtpNczMeoFMpu0LiksWnA">
+      <h2 data-page-node-id="lt0apnlu1DNyZkZV6FARpk">LLM 生成预览</h2>
+      <p class="hint" data-page-node-id="608BJEeGdJxomwYb99FvGb">调用对话模型实时生成一条多样化的下线通知</p>
+      <div class="preview-controls" data-page-node-id="12cUStDBgDDiHUIshRajMq">
+        <div class="form-group" data-page-node-id="a2MmCZG9MMUzxNEkmzdF3c">
+          <label data-page-node-id="7DvIPKSLmpzB6zh6ELldiy">下线时间</label>
+          <input type="time" id="llmPreviewTime" value="23:00" data-page-node-id="6AiboRLJYT2Qeg5eomsLTp">
         </div>
-        <div class="form-group">
-          <label>提前分钟</label>
-          <input type="number" id="llmPreviewAdvance" value="5" min="0" max="30">
+        <div class="form-group" data-page-node-id="OoaU9gEAXePeszTZwIQOHc">
+          <label data-page-node-id="vy0uz5Wy1rXeK6ibmU453G">提前分钟</label>
+          <input type="number" id="llmPreviewAdvance" value="5" min="0" max="30" data-page-node-id="gvBmXYNRSkCSNgtSISK2dZ">
         </div>
-        <div class="form-group">
-          <label>浮动范围(分钟)</label>
-          <input type="number" id="llmPreviewFloat" value="2" min="0" max="10">
+        <div class="form-group" data-page-node-id="hqpoMpG9crGi8IBQ0SpzcG">
+          <label data-page-node-id="Vkl0XZ7awXMTPQ42O1ITRM">浮动范围(分钟)</label>
+          <input type="number" id="llmPreviewFloat" value="2" min="0" max="10" data-page-node-id="IXE6Dvqdi1rYNJgdV7qlys">
         </div>
-        <button class="btn btn-accent" id="llmPreviewBtn">LLM 生成</button>
+        <button class="btn btn-accent" id="llmPreviewBtn" data-page-node-id="3O0G0pFQQkkPFIWjNvmKmY">LLM 生成</button>
       </div>
-      <div class="llm-preview-result" id="llmPreviewResult">
-        <div class="preview-placeholder">点击「LLM 生成」查看对话模型实时生成的通知内容</div>
+      <div class="llm-preview-result" id="llmPreviewResult" data-page-node-id="wXkFWqOLQLY4Wm1ZRpzH3H">
+        <div class="preview-placeholder" data-page-node-id="H49opgIk76vqYpjvTsBjcl">点击「LLM 生成」查看对话模型实时生成的通知内容</div>
       </div>
-      <div class="llm-preview-meta" id="llmPreviewMeta" style="display:none;">
-        <span class="source-tag" id="llmSourceTag"></span>
-        <span class="time-info" id="llmTimeInfo"></span>
+      <div class="llm-preview-meta" id="llmPreviewMeta" style="display:none;" data-page-node-id="QUWI9HxUbIYENNSFavfcs7">
+        <span class="source-tag" id="llmSourceTag" data-page-node-id="i2S7YPV1Uc8rpkZPP1Cukh"></span>
+        <span class="time-info" id="llmTimeInfo" data-page-node-id="AT9gzv4Z1WsprSwhHALI0K"></span>
       </div>
     </section>
 
     <!-- 测试发送卡片 -->
-    <section class="card test-card">
-      <h2>测试发送</h2>
-      <p class="hint">手动向指定群组发送一条测试通知</p>
-      <div class="test-controls">
-        <div class="form-group">
-          <label>目标群号</label>
-          <input type="text" id="testGroupId" placeholder="输入QQ群号">
+    <section class="card test-card" data-page-node-id="BDk9tibsqEGwOklPvNX1Wq">
+      <h2 data-page-node-id="Hf7kDsXsAb1H4DmzX63bYS">测试发送</h2>
+      <p class="hint" data-page-node-id="RBi03T4lrgO25ntGZ5xiVC">手动向指定群组发送一条测试通知</p>
+      <div class="test-controls" data-page-node-id="HxInTqAIpe7Vq4NXBCsqkb">
+        <div class="form-group" data-page-node-id="WBuGD9GnsdGLQY4Svs9HfV">
+          <label data-page-node-id="T8RDpkuH3UphoslgG6GDCs">目标群号</label>
+          <input type="text" id="testGroupId" placeholder="输入QQ群号" data-page-node-id="SWjb4RHkGMHkY4C0RQCU87">
         </div>
-        <button class="btn btn-primary" id="testSendBtn">发送测试通知</button>
+        <button class="btn btn-primary" id="testSendBtn" data-page-node-id="aiqMf4A6RKVFMIpSgAwUhG">发送测试通知</button>
       </div>
-      <div class="test-result" id="testResult"></div>
+      <div class="test-result" id="testResult" data-page-node-id="lmSwNLpmMvGCqcEgeF69RL"></div>
+    </section>
+
+    <!-- 定时计划管理 -->
+    <section class="card schedules-card" data-page-node-id="jVveooy2ZSFoPmjOpDD86s">
+      <h2 data-page-node-id="350OkW57iG9CH9gEqf3CMg"> 定时计划管理</h2>
+      <p class="hint" data-page-node-id="6ZAFaaE7EIw4ra1p311T90">管理下线通知的定时计划（也可用 /下线通知 计划 命令在 QQ 中管理）</p>
+      <div class="schedules-toolbar" data-page-node-id="0sLRfCIekBwfpHcvjST9BD">
+        <button class="btn btn-sm btn-primary" id="addScheduleBtn" data-page-node-id="ctlDiOHj02GWRor0ShOcwQ">+ 添加计划</button>
+        <button class="btn btn-sm" id="refreshSchedulesBtn" data-page-node-id="SOEa9d04z8UR1h3UkvDfCc">刷新</button>
+      </div>
+
+      <!-- 计划表单（默认隐藏，添加 / 编辑复用） -->
+      <div class="schedule-form" id="scheduleForm" style="display:none;" data-page-node-id="77qkVofsAlOQ58Bk8Y1FlF">
+        <div class="form-title" id="scheduleFormTitle" data-page-node-id="4GA6s32sYR2Y7CCJTjcB4H">添加计划</div>
+        <div class="form-row" data-page-node-id="8ZgUcHDedJ0RvGE1UBxguT">
+          <div class="form-group" data-page-node-id="rKyU4SHF5E3KPWmglMjSmN">
+            <label data-page-node-id="iLGTxWOOdCiOHDlUh8KD9H">计划名称</label>
+            <input type="text" id="schedName" placeholder="如: 工作日下线" data-page-node-id="zSj6HjSnIurdu0v1nCDKHZ">
+          </div>
+          <div class="form-group" data-page-node-id="N2MuAdlEPXInkikG8ZYhVx">
+            <label data-page-node-id="y0fBOcbMDJIdN6Ri2s7JA0">日期类型</label>
+            <select id="schedDayType" data-page-node-id="NmVwH9ufMzAr09DoKKnTsu">
+              <option value="everyday" data-page-node-id="mNhNlaIc56A9CEDZW9wG8V">每天</option>
+              <option value="weekday" data-page-node-id="Y3mQCjstbmaHlHlr73kvFF">工作日</option>
+              <option value="weekend" data-page-node-id="jQjZQQAP7PCCgEWcl4sPr7">周末</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-row" data-page-node-id="1pac0i8FckbAXX5DEPkbbn">
+          <div class="form-group" data-page-node-id="vfbxwBU1FFFI7BOG0Fs6AL">
+            <label data-page-node-id="ejbdAGEZjoHWkgQd4fngh1">下线时间</label>
+            <input type="time" id="schedTime" value="23:00" data-page-node-id="EFtZIfY1NgfDPFSsBd0xyj">
+          </div>
+          <div class="form-group" data-page-node-id="i5GygTuQ7kEuARkS2Eh3eP">
+            <label data-page-node-id="c13lvAPaS9eCGt5sHmUfZR">浮动（分钟）</label>
+            <input type="number" id="schedFloat" value="0" min="0" max="10" data-page-node-id="oEalRTgMKJSE0AprKByWw7">
+          </div>
+        </div>
+        <div class="form-actions" data-page-node-id="sZi4EYgsK0eVGGVb3uQCHB">
+          <button class="btn btn-primary btn-sm" id="saveScheduleBtn" data-page-node-id="OhMVDDiyHecVFerBiC5yUb">保存</button>
+          <button class="btn btn-sm" id="cancelScheduleBtn" data-page-node-id="VSRUY8aQ7qAcyvkoZPT2iR">取消</button>
+        </div>
+      </div>
+
+      <div class="schedules-list" id="schedulesList" data-page-node-id="zrjw97EtfsA21wyg288IO9">
+        <div class="empty-state" data-page-node-id="OnHFDK1dHzIFwhrCPVXmxg">点击「刷新」加载计划列表</div>
+      </div>
     </section>
 
     <!-- 任务列表 -->
-    <section class="card jobs-card">
-      <h2>定时任务列表</h2>
-      <div class="jobs-list" id="jobsList">
-        <div class="empty-state">点击「刷新状态」加载任务列表</div>
+    <section class="card jobs-card" data-page-node-id="uiEWEK0VdPDP6yKAvJbtSp">
+      <h2 data-page-node-id="qsuwgGYVbH8819DZAUjhsz">定时任务列表</h2>
+      <p class="hint" data-page-node-id="RhSmjBJG44OwOw5aShtcF5">每个计划拆成两个边界任务：<b data-page-node-id="khtwLq8POsdPWV8k11aZ8n">监听开始</b>（下线前进入监听窗口，开始留意群消息）→ <b>监听结束</b>（下线后退出监听窗口、清理状态）。真正的发送只发生在窗口内命中目标群消息、借被动 msg_id 搭便车时；窗口内始终无人发言则当天通知发不出，无兜底补发。</p>
+      <div class="jobs-list" id="jobsList" data-page-node-id="BmtCYlmQIZ6ghvSD4MXamE">
+        <div class="empty-state" data-page-node-id="SQPFt3QHXHkOGNDAHMqUc0">点击「刷新状态」加载任务列表</div>
       </div>
     </section>
 
     <!-- 通知发布记录 -->
-    <section class="card records-card">
-      <h2>通知发布记录</h2>
-      <p class="hint">查看最近的通知发送历史</p>
-      <div class="records-toolbar">
-        <button class="btn btn-sm" id="refreshRecordsBtn">刷新记录</button>
-        <span class="records-count" id="recordsCount"></span>
+    <section class="card records-card" data-page-node-id="blTVUF9WjMYpWZP2gDARPu">
+      <h2 data-page-node-id="aPstq0UxDP6NMvtR8cB1KC">通知发布记录</h2>
+      <p class="hint" data-page-node-id="UfVLWLnPVDWA2cKeGVTVt6">查看最近的通知发送历史</p>
+      <div class="records-toolbar" data-page-node-id="6C8XxWmGSFuh7ExSdxLyKu">
+        <button class="btn btn-sm" id="refreshRecordsBtn" data-page-node-id="lRM9RWTDqq7k5kWF1HBrga">刷新记录</button>
+        <span class="records-count" id="recordsCount" data-page-node-id="PQ9l32Qkx7DsD2Mh0V7gwz"></span>
       </div>
-      <div class="records-table-wrapper">
-        <table class="records-table" id="recordsTable">
-          <thead>
-            <tr>
-              <th>时间</th>
-              <th>计划</th>
-              <th>下线时间</th>
-              <th>提前</th>
-              <th>浮动</th>
-              <th>来源</th>
-              <th>发送结果</th>
+      <div class="records-table-wrapper" data-page-node-id="mbytOIjSCizwR8yj0F7lMh">
+        <table class="records-table" id="recordsTable" data-page-node-id="ANAWoFQ6b3FmlpH86u6JqZ">
+          <thead data-page-node-id="Mk0U0Y6VTv39dMcVumXy6f">
+            <tr data-page-node-id="fUZqD5QBCjcFrStqCHRVQB">
+              <th data-page-node-id="JIqf8CCA6Jah6cE4f784TW">时间</th>
+              <th data-page-node-id="7D1W7uufxRMFM0baK7q6dC">计划</th>
+              <th data-page-node-id="cWpbitYaoMOfHc1cokwJfc">下线时间</th>
+              <th data-page-node-id="yarJbHJAdykWWIr7B8s1NU">提前</th>
+              <th data-page-node-id="vdDYDckae9EENb8EP8D8Av">浮动</th>
+              <th data-page-node-id="tVZpyOhHMDysPuFQdNN6Ij">来源</th>
+              <th data-page-node-id="kJTypkC1NM1mmh0i7k7kmH">发送结果</th>
             </tr>
           </thead>
-          <tbody id="recordsBody">
-            <tr><td colspan="7" class="empty-state">点击「刷新记录」加载历史记录</td></tr>
+          <tbody id="recordsBody" data-page-node-id="f1qYticBMEs7m7Rrwlg15p">
+            <tr data-page-node-id="sWpCHSAIHT4dTmCGqVSKyd"><td colspan="7" class="empty-state" data-page-node-id="IBSqGSCit76tHPkXOfb0RF">点击「刷新记录」加载历史记录</td></tr>
           </tbody>
         </table>
       </div>
     </section>
   </div>
 
-  <div class="toast" id="toast"></div>
+  <div class="toast" id="toast" data-page-node-id="SHaYjjAOdoycL5ecgmD2Ai"></div>
 
   <script src="app.js"></script>
 </body>

@@ -2,43 +2,47 @@
 AI下线通知系统 - AstrBot 插件主入口
 
 功能概述:
-- 基于 APScheduler 实现定时下线通知（浮动时间）
+- 基于 APScheduler 实现「监听窗口」调度（监听开始 / 监听结束两个边界 cron）
+- 被动窗口事件驱动：窗口内命中目标群消息即触发发送（借被动 msg_id）
 - 支持调用 LLM 生成多样化、自然的下线通知内容
 - 内置消息模板作为 LLM 失败时的回退方案
-- 浮动时间机制: 通知在 advance_minutes 到 advance_minutes+float_range 之间随机触发
+- 监听窗口结束（下线后）仅清理状态；窗口内无人发言则本次不发送，无兜底补发
 - 支持工作日/周末/特定日期差异化时间
 - 支持多群组同时通知
-- 通知发布记录查询（WebUI + 命令）
-- 通知预览功能
+- 通知发布记录查询（WebUI）
+- 通知预览（WebUI）
 - 发送失败重试机制
-- 调度器自我监控与告警（群聊+私聊双通道）
+- 调度器自我监控与告警
+
+仅支持 QQ 官方机器人（qq_official / qq_official_webhook）平台。
 
 命令:
-  /下线通知 状态     - 查看调度器运行状态和 LLM 统计
-  /下线通知 预览     - 预览通知消息效果（模板）
-  /下线通知 生成     - 调用 LLM 实时生成一条通知预览
-  /下线通知 测试     - 手动触发一次测试通知
-  /下线通知 统计     - 查看发送统计和通知历史
-  /下线通知 记录 [N] - 查看最近 N 条通知发布记录
-  /下线通知 提示词   - 管理提示词方案（保存/切换/查看/删除，多套互不干扰）
+  /下线通知 生成     - 调用 LLM 生成一条通知（群聊仅预览，私聊加群 openid 可发送）
+  /下线通知 计划     - 管理定时通知计划（无需编辑 JSON 配置！）
 """
 
 import asyncio
+import random
 from datetime import datetime
+from pathlib import Path
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.api import logger, AstrBotConfig
 
 from .core import (NotificationScheduler, GroupNotifier, TemplateEngine,
-                   SchedulerMonitor, LLMGenerator, RecordStore, PromptStore)
-from .core.notifier import split_long_message, SEGMENT_SEND_INTERVAL
+                   SchedulerMonitor, LLMGenerator, RecordStore, PromptStore,
+                   ScheduleStore, WindowState, PlatformCaps, SessionActivityTracker,
+                   resolve_platform, resolve_platforms,
+                   validate_target_id, validate_target_id_multi,
+                   QQ_OFFICIAL_PASSIVE_TTL, sync_changelog_from_readme)
 
 
 @register(
     "astrbot_plugin_offline_notify",
     "AstrBot User",
-    "定时向QQ群发送AI服务下线提醒，支持LLM生成多样化通知、浮动时间、多群组等",
-    "v1.5.0",
+    "定时向QQ群发送AI服务下线提醒（QQ官方机器人 qq_official），支持 LLM 生成"
+    "多样化通知、被动窗口事件驱动触发、多群组等",
+    "v2.0.0",
     "https://github.com/astrbot/astrbot_plugin_offline_notify"
 )
 class OfflineNotifyPlugin(Star):
@@ -57,18 +61,55 @@ class OfflineNotifyPlugin(Star):
         self.monitor: SchedulerMonitor = None
         self.record_store: RecordStore = None
         self.prompt_store: PromptStore = None
+        self.schedule_store: ScheduleStore = None
+        self.window_state: WindowState = None
+
+        # 窗口触发时的发送去重/并发锁（防止同一条入站消息触发多次发送）
+        self._firing: set = set()
 
         # 获取插件数据目录
         self.plugin_data_dir = StarTools.get_data_dir("astrbot_plugin_offline_notify")
 
-        # 平台标识（平台实例名称，如"小砂糖"，用于构造 UMO）
-        self.platform_id = config.get("platform_id", "小砂糖")
+        # 发送平台实例名（WebUI 中给适配器起的名字，用于构造 UMO）。仅支持单个实例。
+        # 兼容旧版 list 配置：数组则取首个非空元素。
+        raw_ids = config.get("platform_ids") or ""
+        if isinstance(raw_ids, list):
+            raw_ids = next((i for i in raw_ids if i), "")
+        self.platform_ids = [raw_ids] if raw_ids else []
+        # 代表性单值，供日志/命令回显兼容使用
+        self.platform_id = self.platform_ids[0] if self.platform_ids else ""
+
+        # 平台能力画像列表，在 initialize() 中根据运行时已启用的适配器解析
+        self.capses: list = []
+
+        # 会话活跃度跟踪（QQ 官方被动 msg_id 只有 5 分钟窗口，需要提前预警）
+        self.activity = SessionActivityTracker()
+
+    @property
+    def caps(self) -> PlatformCaps:
+        """代表性平台画像（第一个），供单值语义的日志/命令回显兼容使用。
+
+        需要遍历全部平台的发送/告警逻辑请直接用 ``self.capses``。
+        """
+        return self.capses[0] if self.capses else PlatformCaps()
 
     # ── 生命周期 ──────────────────────────────────────────
+
+    def _sync_changelog_from_readme(self) -> str:
+        """把 README 的「更新日志」章节同步为 CHANGELOG.md（幂等，失败不影响插件）。"""
+        return sync_changelog_from_readme(
+            Path(__file__).resolve().parent, self.plugin_data_dir, logger
+        )
 
     async def initialize(self):
         """插件初始化：加载配置、启动调度器和监控"""
         logger.info("[离线通知] 正在初始化...")
+
+        # README「更新日志」→ CHANGELOG.md，供 WebUI 插件详情页展示
+        self._sync_changelog_from_readme()
+
+        # 解析平台能力画像：决定 UMO 形态、分段策略、纯文本/Markdown 等
+        self._resolve_platform_caps()
 
         # 初始化模板引擎（始终初始化，作为回退方案）
         self.template_engine = TemplateEngine(self.config.get("message_template", {}))
@@ -76,11 +117,18 @@ class OfflineNotifyPlugin(Star):
         # 初始化提示词方案库（命名方案，互不干扰地保存 / 切换）
         self.prompt_store = PromptStore(self.plugin_data_dir)
 
+        # 初始化计划存储（计划由命令管理，不依赖配置系统）
+        self.schedule_store = ScheduleStore(self.plugin_data_dir)
+
+        # 初始化窗口状态机（armed 标记 + 每日发送去重，持久化到磁盘）
+        self.window_state = WindowState(self.plugin_data_dir)
+
         # 初始化 LLM 生成器（传入方案库，支持「激活方案 > 配置自定义 > 内置默认」三级覆盖）
         self.llm_generator = LLMGenerator(
             self.context,
             self.config.get("llm_generation_config", {}),
-            prompt_store=self.prompt_store
+            prompt_store=self.prompt_store,
+            retry_config=self.config.get("retry_config", {}),
         )
 
         # 初始化通知器
@@ -92,32 +140,141 @@ class OfflineNotifyPlugin(Star):
         # 初始化记录存储
         self.record_store = RecordStore(self.plugin_data_dir)
 
-        # 设置调度器回调
-        self.scheduler.set_callback(self._on_schedule_trigger)
+        # 设置调度器监听开始/监听结束回调
+        self.scheduler.set_callbacks(self._on_window_open, self._on_window_close)
 
-        # 配置并启动调度器
-        if self.config.get("enable_notification", True):
-            schedules = self.config.get("schedules", [])
-            global_advance = self.config.get("global_advance_minutes", 5)
-            global_float = self.config.get("global_float_range", 2)
-            self.scheduler.configure_and_start(schedules, global_advance, global_float)
-        else:
-            logger.info("[离线通知] 通知功能已禁用，调度器未启动")
+        # 配置并启动调度器（始终启动；无计划则不会触发任何通知，计划由 /下线通知 计划 命令管理）
+        schedules = self.schedule_store.list_all()
+        window_before = self.config.get("window_before_minutes", 30)
+        window_after = self.config.get("window_after_minutes", 30)
+        self.scheduler.configure_and_start(schedules, window_before, window_after)
+
+        # 重建窗口状态：插件重载 / bot 重启后，把「当前正处于时间窗口内」的计划
+        # 重新标记为 armed，使事件驱动触发能立即恢复。
+        self._rebuild_armed_state(schedules, window_before, window_after)
 
         # 初始化并启动监控器
         monitor_config = self.config.get("monitor_config", {})
-        monitor_config["platform_id"] = self.platform_id
+        monitor_config["platform_ids"] = self.platform_ids
         self.monitor = SchedulerMonitor(
             self.context,
             self.scheduler,
-            monitor_config
+            monitor_config,
+            caps=self.capses,
         )
         await self.monitor.start()
 
         # 注册 WebUI API 路由
         self._register_web_apis()
 
+        # 启动时校验目标群标识是否符合当前平台形态，尽早暴露配置错误
+        self._audit_target_groups()
+
         logger.info("[离线通知] 初始化完成")
+
+    # ── 平台适配 ──────────────────────────────────────────
+
+    def _resolve_platform_caps(self):
+        """解析当前生效的平台实例，构建能力画像。
+
+        配置的 platform_id 找不到时会自动回退到唯一一个已启用平台（并告警）。
+        """
+        self.capses = resolve_platforms(self.context, self.platform_ids)
+        # 自动回退后同步真实生效的 ID，避免后续日志/命令回显不一致
+        self.platform_id = self.caps.platform_id
+        logger.info(
+            "[离线通知] 生效平台: "
+            + " | ".join(c.describe() for c in self.capses)
+        )
+
+    def _audit_target_groups(self):
+        """校验 target_groups 中的群标识是否符合当前平台的形态要求。"""
+        bad = []
+        for group in self.config.get("target_groups", []) or []:
+            gid = group if isinstance(group, str) else str(group.get("group_id", ""))
+            if not gid:
+                continue
+            ok, hint = validate_target_id_multi(self.capses, gid)
+            if not ok:
+                bad.append((gid, hint))
+        for gid, hint in bad:
+            logger.error(f"[离线通知] 目标群「{gid}」配置有误: {hint}")
+        if bad:
+            logger.error(
+                f"[离线通知] 共 {len(bad)} 个目标群标识与当前平台"
+                f"({self.caps.platform_type or '未知'})不匹配，这些群的通知将无法送达。"
+            )
+
+    @filter.on_platform_loaded()
+    async def _on_platform_loaded(self, *args, **kwargs):
+        """平台适配器加载完成后重新解析能力画像。
+
+        插件 initialize() 可能早于平台实例注册完成，届时解析结果为「未找到」。
+        平台就绪后再解析一次，并把新画像同步给监控器。
+        """
+        self._resolve_platform_caps()
+        if self.monitor:
+            self.monitor.capses = self.capses
+        self._audit_target_groups()
+
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def _track_session_activity(self, event: AstrMessageEvent):
+        """记录会话活跃度，并在窗口内命中目标群消息时触发下线通知。
+
+        不消费事件、不产生回复（触发发送走 context.send_message 主动路径）。
+        """
+        try:
+            self.activity.touch(event.unified_msg_origin)
+        except Exception:  # pragma: no cover - 绝不因监听而影响主流程
+            pass
+        try:
+            await self._maybe_fire_windowed(event)
+        except Exception:  # pragma: no cover
+            logger.debug("[离线通知] 窗口触发判断异常，忽略", exc_info=True)
+
+    def _ensure_caps(self):
+        """发送前兜底：若所有平台都仍未解析成功，再尝试解析一次。"""
+        if not any(c.found for c in self.capses):
+            self._resolve_platform_caps()
+
+    def _notify_result(self, event: AstrMessageEvent, text: str):
+        """构造通知内容的回复结果，按平台能力决定是否强制纯文本。
+
+        QQ 官方事件回复路径默认走 Markdown（msg_type=2），需要事先报备 Markdown
+        模板；通知内容是纯散文，强制纯文本更稳妥。
+        """
+        result = event.plain_result(text)
+        if any(c.force_plain_text for c in self.capses):
+            try:
+                # MessageChain.use_markdown(False) → use_markdown_ = False
+                result.use_markdown(False)
+            except Exception:  # pragma: no cover - 老版本内核无此方法
+                try:
+                    result.use_markdown_ = False
+                except Exception:
+                    pass
+        return result
+
+    def _warn_passive_window(self, group_ids):
+        """QQ 官方专用：发送前提示被动回复窗口是否已关闭。"""
+        qq_capses = [c for c in self.capses if c.is_qq_official]
+        if not qq_capses:
+            return
+        for c in qq_capses:
+            for gid in group_ids:
+                umo = c.group_umo(gid)
+                age = self.activity.age(umo)
+                if age is None:
+                    logger.warning(
+                        f"[离线通知] 群 {gid}（平台 {c.platform_id}）本次运行期间未收到过消息，"
+                        f"QQ 官方协议下大概率没有可用的被动 msg_id，通知可能无法送达。"
+                    )
+                elif age > QQ_OFFICIAL_PASSIVE_TTL:
+                    logger.warning(
+                        f"[离线通知] 群 {gid}（平台 {c.platform_id}）距上次消息已 {age / 60:.1f} 分钟，"
+                        f"超出 QQ 官方被动回复窗口({QQ_OFFICIAL_PASSIVE_TTL}s)，"
+                        f"本次将退化为主动推送并占用官方消息配额。"
+                    )
 
     async def terminate(self):
         """插件卸载：停止调度器和监控"""
@@ -168,71 +325,225 @@ class OfflineNotifyPlugin(Star):
                 return "llm"
         return "template"
 
-    # ── 调度器回调 ─────────────────────────────────────────
+    # ── 窗口回调与事件驱动触发 ─────────────────────────────
 
-    async def _on_schedule_trigger(self, schedule_name: str, offline_time: str,
-                                   actual_countdown: float,
-                                   float_seconds: float, float_range: int):
-        """调度器触发时的回调：生成消息并发送到所有目标群组
+    async def _on_window_open(self, plan_name: str, offline_time: str):
+        """窗口开启回调：标记计划进入「窗口内待发送」状态。"""
+        self.window_state.arm(plan_name)
 
-        Args:
-            schedule_name: 计划名称
-            offline_time: 下线时间
-            actual_countdown: 实际剩余分钟数（浮点）
-            float_seconds: 实际浮动秒数
-            float_range: 配置的浮动范围
+    async def _on_window_close(self, plan_name: str, offline_time: str):
+        """窗口关闭回调：只清理窗口状态，不再尝试发送。
+
+        QQ 官方群消息必须携带 5 分钟内的被动 msg_id。窗口内无人说话 ⇒ 没有可用的
+        msg_id ⇒ 适配器 ``qqofficial_platform_adapter._send_by_session_common``
+        会走 ``skip send_by_session`` 直接 return（不抛异常、不返回 False），
+        消息一条都发不出去。旧实现在这里「降级为群内主动推送」，实际无效，
+        还会被 ``Context.send_message`` 的 None 返回值误判为成功并写入假记录。
         """
-        target_groups = self.config.get("target_groups", [])
-        if not target_groups:
-            logger.warning("[离线通知] 未配置目标群组，无法发送通知")
+        if not self.window_state.is_armed(plan_name):
+            # 未武装（监听结束 cron 每天触发，今天不是该计划活跃日 / 已发送）
             return
-
-        advance = self.config.get("global_advance_minutes", 5)
-        # 尝试从 plans 中找到对应计划的 advance
-        for sched in self.config.get("schedules", []):
-            if sched.get("name") == schedule_name:
-                advance = sched.get("advance_minutes", advance)
-                break
-
-        logger.info(
-            f"[离线通知] 计划 '{schedule_name}' 触发，"
-            f"下线时间 {offline_time}, 实际提前 {actual_countdown:.1f} 分钟, "
-            f"浮动 {float_seconds:.0f}s, 目标群组: {len(target_groups)} 个"
-        )
-
-        # 生成通知消息
-        message = await self._generate_message(offline_time, actual_countdown)
-        message_source = self._detect_message_source()
-
-        if not message:
-            logger.error("[离线通知] 消息生成失败（LLM 和模板均不可用），跳过发送")
-            return
-
-        # 发送通知
-        # 模板回复（source != llm）作为单条纯文本发送，不分段；
-        # LLM 长通知才按句分段。
-        result = await self.notifier.send_to_groups(
-            target_groups, message, self.platform_id,
-            split=(message_source == "llm"),
-        )
-
-        # 写入通知记录
-        await self.record_store.add(
-            schedule_name=schedule_name,
-            offline_time=offline_time,
-            advance_minutes=advance,
-            float_range=float_range,
-            actual_trigger_minutes=actual_countdown,
-            float_seconds=float_seconds,
-            message_source=message_source,
-            results=result,
-        )
-
-        # 记录结果
-        if result["failed"]:
-            logger.warning(
-                f"[离线通知] 部分群组发送失败: {result['failed']}"
+        if self.window_state.already_sent_today(plan_name):
+            logger.info(
+                f"[离线通知] 计划 '{plan_name}' 窗口关闭，今日已发送"
             )
+            return
+        self.window_state.disarm(plan_name)
+        logger.warning(
+            f"[离线通知] 计划 '{plan_name}' 窗口内未等到目标群消息，本次不发送："
+            f"QQ 官方群消息需要 5 分钟内的被动 msg_id，窗口关闭后已无可用 msg_id"
+            f"（强行发送会被适配器静默丢弃）"
+        )
+
+    async def _maybe_fire_windowed(self, event: AstrMessageEvent):
+        """窗口事件驱动触发：入站消息命中 armed 计划的目标群即触发。"""
+        armed = self.window_state.armed_plans()
+        if not armed:
+            return
+        if not any(c.is_qq_official for c in self.capses):
+            return
+
+        umo = event.unified_msg_origin
+        for plan_name in armed:
+            if self.window_state.already_sent_today(plan_name):
+                continue
+            plan = self.schedule_store.get(plan_name)
+            if not plan:
+                continue
+            for caps in self.capses:
+                if not caps.is_qq_official:
+                    continue
+                for gid in self._target_openids():
+                    if umo == caps.group_umo(gid):
+                        # 命中目标群：触发发送（带随机浮动延迟）
+                        # 改用后台任务（fire-and-forget），避免 asyncio.sleep + LLM
+                        # 内联阻塞事件分发管线，拖慢本消息的普通回复链路。
+                        _task = asyncio.create_task(self._fire_with_float(plan, gid))
+                        _task.add_done_callback(self._log_fire_task_done)
+                        return
+
+    async def _fire_with_float(self, plan: dict, gid: str):
+        """命中目标群后，按 trigger_float_minutes 随机延迟再发送（模拟自然节奏）。"""
+        plan_name = plan.get("name", "")
+        if plan_name in self._firing:
+            return
+
+        # 随机浮动延迟：默认 5 分钟内（cap 到 msg_id 被动窗口 TTL 内）
+        float_minutes = self.config.get("trigger_float_minutes", 5)
+        max_delay = min(float(float_minutes), QQ_OFFICIAL_PASSIVE_TTL / 60.0)
+        delay = random.uniform(0, max_delay * 60) if max_delay > 0 else 0.0
+        logger.info(
+            f"[离线通知] 计划 '{plan_name}' 命中目标群 {gid}，"
+            f"随机浮动 {delay:.0f}s 后发送"
+        )
+        if delay > 0:
+            await asyncio.sleep(delay)
+        await self._fire_plan(plan_name, plan.get("offline_time", "23:00"),
+                              trigger="event")
+
+    def _log_fire_task_done(self, task: "asyncio.Task"):
+        """后台触发任务完成回调：吞掉未捕获异常，避免后台任务异常静默丢失。"""
+        try:
+            task.result()
+        except Exception:
+            logger.exception("[离线通知] 后台触发发送任务异常")
+
+    async def _fire_plan(self, plan_name: str, offline_time: str, *,
+                         allow_proactive: bool = False,
+                         trigger: str = "event") -> bool:
+        """生成并发送下线通知到所有目标群（去重 + 并发锁 + 记录）。
+
+        ``allow_proactive=True`` 时不因缺少被动 msg_id 直接放弃，允许走群主动
+        推送；仍会校验适配器是否具备主动推送条件（见 ``notifier._precheck``）。
+        """
+        if self.window_state.already_sent_today(plan_name):
+            return False
+        if plan_name in self._firing:
+            return False
+        self._firing.add(plan_name)
+        try:
+            target_groups = self.config.get("target_groups", [])
+            if not target_groups:
+                logger.warning("[离线通知] 未配置目标群组，无法发送通知")
+                return False
+
+            self._ensure_caps()
+
+            # 距下线时刻的分钟数（正=未到，负=已过）
+            countdown = self._offline_minutes_away(offline_time)
+
+            logger.info(
+                f"[离线通知] 计划 '{plan_name}' 触发发送（{trigger}），"
+                f"下线时间 {offline_time}, 距下线 {countdown:.1f} 分钟, "
+                f"目标群组: {len(target_groups)} 个, "
+                f"平台: {' | '.join(c.describe() for c in self.capses)}"
+            )
+
+            message = await self._generate_message(offline_time, countdown)
+            message_source = self._detect_message_source()
+            if not message:
+                logger.error("[离线通知] 消息生成失败（LLM 和模板均不可用），跳过发送")
+                return False
+
+            result = await self.notifier.send_to_groups(
+                target_groups, message, self.capses,
+                split=(message_source == "llm"),
+                allow_proactive=allow_proactive,
+            )
+
+            await self.record_store.add(
+                schedule_name=plan_name,
+                offline_time=offline_time,
+                advance_minutes=0,
+                float_range=self.config.get("trigger_float_minutes", 5),
+                actual_trigger_minutes=countdown,
+                float_seconds=0.0,
+                message_source=message_source,
+                results=result,
+            )
+
+            if result["failed"]:
+                logger.warning(
+                    f"[离线通知] 部分群组发送失败: {result['failed']}"
+                )
+
+            # 至少一个群成功送达才标记去重；全部失败则允许后续重试。
+            if result["success"]:
+                self.window_state.mark_sent(plan_name)
+            return bool(result["success"])
+        finally:
+            self._firing.discard(plan_name)
+
+    # ── 窗口辅助 ───────────────────────────────────────────
+
+    def _target_openids(self) -> list:
+        """返回目标群的 openid 列表（仅启用项）。"""
+        out = []
+        for g in self.config.get("target_groups", []) or []:
+            if isinstance(g, str):
+                out.append(g)
+            elif g.get("enabled", True):
+                out.append(g.get("group_id", ""))
+        return [g for g in out if g]
+
+    @staticmethod
+    def _offline_minutes_away(offline_time: str) -> float:
+        """当前时间距下线时刻的分钟数（正=未到，负=已过）。"""
+        try:
+            h, m = offline_time.strip().split(":")
+            target = datetime.now().replace(
+                hour=int(h), minute=int(m), second=0, microsecond=0
+            )
+        except (ValueError, AttributeError):
+            return 0.0
+        return (target - datetime.now()).total_seconds() / 60.0
+
+    def _is_active_today(self, plan: dict) -> bool:
+        """判断今天是否是该计划的活跃日。"""
+        day_type = plan.get("day_type", "everyday")
+        if day_type == "everyday":
+            return True
+        wd = datetime.now().weekday()  # 0=周一 ... 6=周日
+        if day_type == "weekday":
+            return wd < 5
+        if day_type == "weekend":
+            return wd >= 5
+        if day_type == "specific":
+            names = ["monday", "tuesday", "wednesday", "thursday",
+                     "friday", "saturday", "sunday"]
+            return names[wd] in (plan.get("specific_days") or [])
+        return True
+
+    @staticmethod
+    def _parse_hm(time_str: str) -> tuple:
+        h, m = time_str.strip().split(":")
+        return int(h), int(m)
+
+    def _rebuild_armed_state(self, schedules, window_before, window_after):
+        """重载/重启后重建 armed 状态：当前处于窗口内的活跃计划重新 arm。"""
+        now_minutes = datetime.now().hour * 60 + datetime.now().minute
+        for s in schedules:
+            if not s.get("enabled", True):
+                continue
+            name = s.get("name", "")
+            if not self._is_active_today(s):
+                continue
+            try:
+                h, m = self._parse_hm(s.get("offline_time", "23:00"))
+            except (ValueError, AttributeError):
+                continue
+            offline = h * 60 + m
+            open_min = (offline - window_before) % (24 * 60)
+            close_min = (offline + window_after) % (24 * 60)
+            if open_min <= close_min:
+                in_window = open_min <= now_minutes <= close_min
+            else:
+                in_window = now_minutes >= open_min or now_minutes <= close_min
+            if in_window and not self.window_state.already_sent_today(name):
+                self.window_state.arm(name)
+                logger.info(
+                    f"[离线通知] 重建窗口状态：计划 '{name}' 处于窗口内，已 armed"
+                )
 
     # ── 命令注册 ──────────────────────────────────────────
 
@@ -241,97 +552,15 @@ class OfflineNotifyPlugin(Star):
         """下线通知管理命令组"""
         pass
 
-    @offline_notify.command("状态")
-    async def cmd_status(self, event: AstrMessageEvent):
-        """查看调度器运行状态和 LLM 统计"""
-        status = self.scheduler.get_status()
-        llm_stats = self.llm_generator.get_stats()
-        global_float = self.config.get("global_float_range", 2)
-
-        lines = [
-            "【下线通知系统状态】",
-            "",
-            f"调度器运行: {'✅ 运行中' if status['running'] else '❌ 已停止'}",
-            f"定时任务数: {status['job_count']}",
-            f"浮动范围: 全局 ±{global_float} 分钟" if global_float > 0 else "浮动范围: 精确触发",
-            f"累计触发: {status['trigger_count']} 次",
-            f"累计错误: {status['error_count']} 次",
-        ]
-
-        if status["jobs"]:
-            lines.append("")
-            lines.append("─ 任务列表 ─")
-            for job in status["jobs"]:
-                next_run = job["next_run"] or "暂无"
-                lines.append(f"  · {job['name']}: 下次触发 {next_run}")
-
-        # LLM 生成统计
-        if self.llm_generator.enabled:
-            lines.append("")
-            lines.append("─ LLM 生成统计 ─")
-            lines.append(f"  总调用: {llm_stats['total_calls']} 次")
-            lines.append(f"  成功: {llm_stats['success_calls']} 次")
-            lines.append(f"  失败: {llm_stats['failed_calls']} 次")
-            lines.append(f"  平均耗时: {llm_stats['avg_time_ms']}ms")
-        else:
-            lines.append("")
-            lines.append("─ 消息生成: 模板引擎 ─")
-
-        if status["last_error"]:
-            lines.append("")
-            lines.append(f"最近错误: {status['last_error']}")
-
-        yield event.plain_result("\n".join(lines))
-
-    @offline_notify.command("预览")
-    async def cmd_preview(self, event: AstrMessageEvent):
-        """预览模板消息效果"""
-        schedules = self.config.get("schedules", [])
-        offline_time = "23:00"
-        advance = 5
-        for sched in schedules:
-            if sched.get("enabled", True):
-                offline_time = sched.get("offline_time", "23:00")
-                advance = sched.get("advance_minutes",
-                                    self.config.get("global_advance_minutes", 5))
-                break
-
-        rendered = self.template_engine.render_preview(offline_time, advance)
-
-        preview_lines = [
-            "【模板消息预览】",
-            "",
-            f"下线时间: {offline_time}",
-            f"提前通知: {advance} 分钟",
-            "",
-            "─ 效果 ─",
-            "",
-            rendered["title"],
-            "",
-            rendered["body"],
-        ]
-        if rendered["footer"]:
-            preview_lines.extend(["", rendered["footer"]])
-
-        if self.llm_generator.enabled:
-            preview_lines.extend([
-                "",
-                "提示: 使用 /下线通知 生成 查看 LLM 实时生成效果",
-            ])
-
-        yield event.plain_result("\n".join(preview_lines))
-
     @offline_notify.command("生成")
     async def cmd_generate(self, event: AstrMessageEvent):
-        """调用 LLM 生成下线通知
+        """生成下线通知。
 
-        群聊模式: /下线通知 生成 → 仅预览 LLM 生成结果
-        私聊模式: /下线通知 生成 [QQ群号] → 管理员专用，生成并发送到指定群
-          示例: /下线通知 生成 1006930720
-        """
+群聊发送 → 仅预览 LLM 结果；私聊加群 openid → 管理员专用，生成并发送到该群。
+示例：/下线通知 生成 <群 openid>"""
         # ── 解析命令参数 ──
         # 说明：LLM 禁用或不可用时，本命令会自动回退到模板引擎
-        # （预览 / 生成 / 发送模板通知），不再直接报错退出。
+        # （生成并发送模板通知），不再直接报错退出。
         message_str = event.message_str
         parts = message_str.strip().split()
         group_id = event.get_group_id()
@@ -339,24 +568,22 @@ class OfflineNotifyPlugin(Star):
         if group_id:
             # ── 群聊模式：仅预览（LLM 优先，禁用/失败则预览模板） ──
             now = datetime.now()
-            schedules = self.config.get("schedules", [])
+            schedules = self.schedule_store.list_all()
             offline_time = "23:00"
-            advance = 5
+            countdown = self.config.get("window_before_minutes", 30)
             for sched in schedules:
                 if sched.get("enabled", True):
                     offline_time = sched.get("offline_time", "23:00")
-                    advance = sched.get("advance_minutes",
-                                        self.config.get("global_advance_minutes", 5))
                     break
 
             if self.llm_generator.enabled and self.llm_generator.provider_id:
                 yield event.plain_result("正在调用 LLM 生成通知...")
-                result = await self.llm_generator.generate(offline_time, advance, now)
+                result = await self.llm_generator.generate(offline_time, countdown, now)
                 if result:
                     llm_stats = self.llm_generator.get_stats()
                     yield event.plain_result(
                         f"【LLM 生成结果】\n"
-                        f"下线时间: {offline_time} | 提前: {advance} 分钟 | "
+                        f"下线时间: {offline_time} | 距下线: {countdown} 分钟 | "
                         f"耗时: {llm_stats['avg_time_ms']}ms\n\n{result}"
                     )
                     return
@@ -368,23 +595,27 @@ class OfflineNotifyPlugin(Star):
                     )
 
             # LLM 禁用或失败 → 模板预览
-            template_msg = self.template_engine.build_full_message(offline_time, advance)
+            template_msg = self.template_engine.build_full_message(offline_time, countdown)
             yield event.plain_result(f"【模板预览】\n{template_msg}")
 
         else:
             # ── 私聊模式：发送到指定群 ──
             # 1. 格式校验
+            self._ensure_caps()
             if len(parts) < 3:
+                id_hint = "群 openid（32 位十六进制串）"
                 yield event.plain_result(
-                    "❌ 私聊模式下请指定目标群号\n"
-                    "格式: /下线通知 生成 [QQ群号]\n"
-                    "示例: /下线通知 生成 1006930720"
+                    f"❌ 私聊模式下请指定目标群标识\n"
+                    f"格式: /下线通知 生成 [{id_hint}]\n"
+                    f"当前平台: {self.caps.platform_type or '未知'}"
                 )
                 return
 
             target_group_id = parts[2]
-            if not target_group_id.isdigit():
-                yield event.plain_result("❌ 群号格式不正确，请输入纯数字QQ群号")
+            # 平台感知校验：QQ 官方要求 group_openid（32 位十六进制串）。
+            ok, hint = validate_target_id_multi(self.capses, target_group_id)
+            if not ok:
+                yield event.plain_result(f"❌ {hint}")
                 return
 
             # 2. 权限校验：仅管理员可使用
@@ -444,8 +675,9 @@ class OfflineNotifyPlugin(Star):
                 f"内容长度: {len(result)} 字符，来源: {source}"
             )
 
+            self._warn_passive_window([target_group_id])
             success = await self.notifier.send_to_group(
-                target_group_id, result, self.platform_id,
+                target_group_id, result, self.capses,
                 split=(source == "llm"),
             )
 
@@ -465,274 +697,277 @@ class OfflineNotifyPlugin(Star):
                     f"❌ 通知发送到群 {target_group_id} 失败，请查看日志"
                 )
 
-    @offline_notify.command("测试")
-    async def cmd_test(self, event: AstrMessageEvent):
-        """手动触发一次测试通知（仅发送到当前群）"""
-        group_id = event.get_group_id()
-        if not group_id:
-            yield event.plain_result("❌ 此命令仅支持在群聊中使用")
-            return
+    # ── 计划重载辅助 ──────────────────────────────────────
 
-        now = datetime.now()
-        offline_time = now.strftime("%H:%M")
-        message = await self._generate_message(offline_time, 5)
-        source = self._detect_message_source()
+    def _reload_scheduler_from_store(self):
+        """从 ScheduleStore 重新加载调度器（计划变更后调用）。"""
+        schedules = self.schedule_store.list_all()
+        window_before = self.config.get("window_before_minutes", 30)
+        window_after = self.config.get("window_after_minutes", 30)
+        self.scheduler.reload_jobs(schedules, window_before, window_after)
+        # 重载后重建窗口状态
+        self._rebuild_armed_state(schedules, window_before, window_after)
 
-        # 直接发送到当前群
-        # 模板回复（source != llm）作为单条纯文本发送，不分段；
-        # LLM 长通知才按句切分逐段发送（与群通知一致）。
-        try:
-            if source == "llm":
-                segments = split_long_message(message)
-                for idx, seg in enumerate(segments):
-                    await event.send(event.plain_result(seg))
-                    if idx < len(segments) - 1:
-                        await asyncio.sleep(SEGMENT_SEND_INTERVAL)
-            else:
-                await event.send(event.plain_result(message))
-            yield event.plain_result("✅ 测试通知已发送到当前群")
-        except Exception as e:
-            logger.error(f"[离线通知] 测试通知发送失败: {e}", exc_info=True)
-            yield event.plain_result(f"❌ 测试通知发送失败: {e}")
+    # ── 定时计划管理命令 ─────────────────────────────────
 
-    @offline_notify.command("统计")
-    async def cmd_stats(self, event: AstrMessageEvent):
-        """查看发送统计和通知历史摘要"""
-        stats = self.notifier.get_stats()
-        sched_status = self.scheduler.get_status()
-        llm_stats = self.llm_generator.get_stats()
-        record_stats = await self.record_store.get_stats()
-        global_float = self.config.get("global_float_range", 2)
+    @offline_notify.command("计划")
+    async def cmd_schedule(self, event: AstrMessageEvent):
+        """管理定时通知计划（无需改 JSON 配置）。
 
-        last_send = "从未"
-        if stats["last_send_time"]:
-            dt = datetime.fromtimestamp(stats["last_send_time"])
-            last_send = dt.strftime("%Y-%m-%d %H:%M:%S")
+子命令：列表 / 添加 / 删除 / 启用 / 禁用 / 修改；写操作仅管理员。"""
+        import re
 
-        lines = [
-            "【通知发送统计】",
-            "",
-            f"成功发送: {stats['total_sent']} 次",
-            f"发送失败: {stats['total_failed']} 次",
-            f"最近发送: {last_send}",
-            f"调度触发: {sched_status['trigger_count']} 次",
-            f"调度错误: {sched_status['error_count']} 次",
-            f"浮动范围: {'±' + str(global_float) + ' 分钟' if global_float > 0 else '精确触发'}",
-        ]
-
-        if record_stats["total"] > 0:
-            lines.extend([
-                "",
-                f"通知记录: {record_stats['total']} 条",
-                f"LLM 生成: {record_stats['llm_count']} 次 / 模板: {record_stats['template_count']} 次",
-                f"平均浮动: {record_stats['avg_float_seconds']:.0f}s",
-                f"群组发送: 成功 {record_stats['total_success_groups']} / 失败 {record_stats['total_failed_groups']}",
-            ])
-
-        if self.llm_generator.enabled:
-            lines.extend([
-                "",
-                f"LLM 调用: {llm_stats['total_calls']} 次 "
-                f"(成功 {llm_stats['success_calls']} / 失败 {llm_stats['failed_calls']})",
-                f"LLM 平均耗时: {llm_stats['avg_time_ms']}ms",
-            ])
-
-        if stats["last_error"]:
-            lines.append(f"最近错误: {stats['last_error']}")
-
-        yield event.plain_result("\n".join(lines))
-
-    @offline_notify.command("记录")
-    async def cmd_records(self, event: AstrMessageEvent):
-        """查看最近 N 条通知发布记录"""
-        # 解析参数: /下线通知 记录 5
         message_str = event.message_str
+        # 预处理：统一中文冒号 + 去掉冒号两侧空格（避免 "10: 30" 被截断）
+        message_str = message_str.replace("：", ":")
+        message_str = re.sub(r"\s*:\s*", ":", message_str)
+
         parts = message_str.strip().split()
-        limit = 5
-        if len(parts) >= 3:
-            try:
-                limit = int(parts[2])
-                limit = max(1, min(limit, 20))
-            except ValueError:
-                pass
+        # parts[0]="下线通知" parts[1]="计划" parts[2]=子命令 ...
 
-        records = await self.record_store.query_latest(limit)
-
-        if not records:
-            yield event.plain_result("暂无通知发布记录")
-            return
-
-        lines = [f"【最近 {len(records)} 条通知记录】", ""]
-        for i, r in enumerate(records, 1):
-            dt = r.get("datetime", "未知")
-            name = r.get("schedule_name", "未知")
-            offline = r.get("offline_time", "?")
-            actual = r.get("actual_trigger_minutes", "?")
-            float_s = r.get("float_seconds", 0)
-            source = r.get("message_source", "?")
-            results = r.get("results", {})
-            success_count = len(results.get("success", []))
-            failed_count = len(results.get("failed", []))
-
-            float_info = f"浮动 {float_s:.0f}s" if float_s > 0 else "精确"
-            lines.append(
-                f"{i}. [{dt}] {name}\n"
-                f"   下线 {offline} | 提前 {actual}min | {float_info} | 来源 {source}\n"
-                f"   发送: 成功 {success_count} 群 / 失败 {failed_count} 群"
-            )
-
-        total = self.record_store.get_total_count()
-        if total > limit:
-            lines.append(f"\n... 共 {total} 条记录，显示最近 {limit} 条")
-
-        yield event.plain_result("\n".join(lines))
-
-    @offline_notify.command("提示词")
-    async def cmd_prompt(self, event: AstrMessageEvent):
-        """管理提示词方案（命名方案库，多套提示词互不干扰）
-
-        /下线通知 提示词              - 查看所有方案与当前生效来源
-        /下线通知 提示词 查看 <名称>   - 查看某方案的提示词内容
-        /下线通知 提示词 保存 <名称>   - 把当前生效的提示词存成命名方案
-        /下线通知 提示词 切换 <名称>   - 激活某方案（覆盖配置/默认）
-        /下线通知 提示词 默认          - 取消激活，回退到配置/内置默认
-        /下线通知 提示词 删除 <名称>   - 删除某方案
-
-        优先级：激活方案 > 配置自定义(custom_*_prompt) > 内置「砂糖」默认。
-        读取操作（列表/查看）开放；写操作（保存/切换/默认/删除）仅管理员。
-        """
-        message_str = event.message_str
-        parts = message_str.strip().split()
-        # parts[0]="下线通知" parts[1]="提示词" parts[2]=子命令 parts[3:]=参数
         sub = parts[2] if len(parts) >= 3 else ""
+        labels = ScheduleStore.DAY_TYPE_LABELS
+        valid_keys = ScheduleStore.DAY_TYPE_VALID_KEYS
 
-        def _effective_source() -> str:
-            active = self.prompt_store.get_active()
-            if active:
-                return f"命名方案「{active}」"
-            if self.llm_generator.custom_builtin or self.llm_generator.custom_manual:
-                return "配置自定义(custom_*_prompt)"
-            return "内置默认「砂糖」"
-
-        # ── 读操作：列表 / 查看，所有人可用 ──────────────
-        if sub in ("", "列表", "list"):
-            names = self.prompt_store.list_profiles()
-            active = self.prompt_store.get_active()
-            lines = [
-                "【提示词方案库】",
-                "",
-                f"当前生效来源: {_effective_source()}",
-                f"已保存方案: {len(names)} 个",
-            ]
-            if names:
-                lines.append("")
-                for n in names:
-                    mark = " ← 当前激活" if n == active else ""
-                    lines.append(f"  · {n}{mark}")
-            else:
-                lines.append("  （暂无命名方案，用「/下线通知 提示词 保存 <名称>」新建）")
-            lines.extend([
-                "",
-                "用法:",
-                "  /下线通知 提示词 查看 <名称>",
-                "  /下线通知 提示词 保存 <名称>",
-                "  /下线通知 提示词 切换 <名称>",
-                "  /下线通知 提示词 默认",
-                "  /下线通知 提示词 删除 <名称>",
-            ])
-            yield event.plain_result("\n".join(lines))
+        # ── 帮助信息 ──────────────────────────
+        if sub in ("帮助", "help", ""):
+            yield event.plain_result(
+                "【定时计划管理 — 无需编辑 JSON！】\n"
+                "\n"
+                "📋 /下线通知 计划 列表\n"
+                "   查看所有计划\n"
+                "\n"
+                "➕ /下线通知 计划 添加 <名称> <日期类型> <下线时间>\n"
+                "   日期类型: 每天/工作日/周末\n"
+                "   窗口与触发时机由全局设置统一控制，无需逐计划指定\n"
+                "   示例: /下线通知 计划 添加 工作日下线 工作日 23:00\n"
+                "   示例: /下线通知 计划 添加 周末晚安 周末 23:30\n"
+                "\n"
+                "🗑️ /下线通知 计划 删除 <名称>\n"
+                "   删除指定计划\n"
+                "\n"
+                "✅ /下线通知 计划 启用 <名称>\n"
+                "   启用指定计划\n"
+                "\n"
+                "⏸️ /下线通知 计划 禁用 <名称>\n"
+                "   禁用指定计划（暂停但不删除）\n"
+                "\n"
+                "✏️ /下线通知 计划 修改 <名称> <字段> <值>\n"
+                "   字段: 时间(HH:MM) / 日期(类型)\n"
+                "   中英文冒号均可，空格会被自动忽略\n"
+                "   示例: /下线通知 计划 修改 工作日下线 时间 22:30\n"
+                "   示例: /下线通知 计划 修改 周末晚安 日期 每天"
+            )
             return
 
-        if sub in ("查看", "view"):
-            if len(parts) < 4:
-                yield event.plain_result("❌ 请指定方案名：/下线通知 提示词 查看 <名称>")
-                return
-            name = " ".join(parts[3:])
-            prof = self.prompt_store.get_profile(name)
-            if not prof:
+        # ── 列表 ──────────────────────────────
+        if sub in ("列表", "list", "ls"):
+            schedules = self.schedule_store.list_all()
+            if not schedules:
                 yield event.plain_result(
-                    f"❌ 方案「{name}」不存在\n"
-                    f"已有方案: {self.prompt_store.list_profiles() or '（无）'}"
+                    "📭 暂无定时计划\n"
+                    "用 /下线通知 计划 添加 创建一个吧~\n"
+                    "示例: /下线通知 计划 添加 工作日下线 工作日 23:00"
                 )
                 return
-            lines = [
-                f"【方案「{name}」】",
-                "",
-                "── 自动通知提示词 (builtin) ──",
-                prof.get("builtin_prompt", "") or "（空）",
-                "",
-                "── 手动生成提示词 (manual) ──",
-                prof.get("manual_prompt", "") or "（空）",
-            ]
+
+            lines = [f"【定时计划列表 — 共 {len(schedules)} 个】", ""]
+            for s in schedules:
+                name = s.get("name", "?")
+                day_label = labels.get(s.get("day_type", ""), s.get("day_type", "?"))
+                time_str = s.get("offline_time", "?")
+                enabled = s.get("enabled", True)
+
+                status_icon = "🟢" if enabled else "🔴"
+                status_text = "启用" if enabled else "禁用"
+
+                lines.append(
+                    f"{status_icon} {name}  [{status_text}]\n"
+                    f"   日期: {day_label} | 下线: {time_str}"
+                )
+
             yield event.plain_result("\n".join(lines))
             return
 
-        # ── 写操作：admin-only ──────────────────────────
+        # ── 写操作：admin-only ──────────────────
         if not event.is_admin():
             sender = event.get_sender_name() or event.get_sender_id()
-            logger.warning(f"[离线通知] 非管理员 {sender} 尝试管理提示词方案")
-            yield event.plain_result("❌ 仅管理员可管理提示词方案（保存/切换/默认/删除）")
-            return
-
-        if sub in ("保存", "save"):
-            if len(parts) < 4:
-                yield event.plain_result("❌ 请指定方案名：/下线通知 提示词 保存 <名称>")
-                return
-            name = " ".join(parts[3:])
-            b_tpl, m_tpl = self.llm_generator.get_effective_prompts()
-            self.prompt_store.upsert(name, b_tpl, m_tpl)
+            logger.warning(f"[离线通知] 非管理员 {sender} 尝试管理定时计划")
             yield event.plain_result(
-                f"✅ 已保存方案「{name}」\n"
-                f"（快照了当前生效的 builtin + manual 提示词，来源: {_effective_source()}）"
+                "❌ 仅管理员可管理定时计划\n"
+                "（查看计划请用 /下线通知 计划 列表）"
             )
             return
 
-        if sub in ("切换", "switch"):
-            if len(parts) < 4:
-                yield event.plain_result("❌ 请指定方案名：/下线通知 提示词 切换 <名称>")
-                return
-            name = " ".join(parts[3:])
-            if not self.prompt_store.get_profile(name):
+        # ── 添加 ──────────────────────────────
+        if sub in ("添加", "add", "新增", "new"):
+            if len(parts) < 5:
                 yield event.plain_result(
-                    f"❌ 方案「{name}」不存在\n"
-                    f"已有方案: {self.prompt_store.list_profiles() or '（无）'}"
+                    "❌ 参数不足\n"
+                    "格式: /下线通知 计划 添加 <名称> <日期类型> <下线时间>\n"
+                    "示例: /下线通知 计划 添加 工作日下线 工作日 23:00"
                 )
                 return
-            self.prompt_store.set_active(name)
-            yield event.plain_result(
-                f"✅ 已激活方案「{name}」，后续通知生成将使用它\n"
-                f"（优先级高于配置自定义与内置默认；用「/下线通知 提示词 默认」可回退）"
-            )
-            return
 
-        if sub in ("默认", "default"):
-            self.prompt_store.set_active(None)
-            yield event.plain_result(
-                "✅ 已取消激活方案，回退到配置自定义 / 内置「砂糖」默认提示词\n"
-                f"当前生效来源: {_effective_source()}"
-            )
-            return
+            name = parts[3]
+            day_type_input = parts[4]
+            offline_time = parts[5] if len(parts) > 5 else "23:00"
 
-        if sub in ("删除", "delete"):
-            if len(parts) < 4:
-                yield event.plain_result("❌ 请指定方案名：/下线通知 提示词 删除 <名称>")
+            # 解析日期类型
+            day_type = valid_keys.get(day_type_input) or day_type_input
+            if day_type not in {"everyday", "weekday", "weekend"}:
+                yield event.plain_result(
+                    f"❌ 不支持的日期类型「{day_type_input}」\n"
+                    "可选: 每天 / 工作日 / 周末"
+                )
                 return
-            name = " ".join(parts[3:])
-            if self.prompt_store.delete(name):
-                yield event.plain_result(f"✅ 已删除方案「{name}」")
-            else:
-                yield event.plain_result(f"❌ 方案「{name}」不存在")
+
+            if self.schedule_store.exists(name):
+                yield event.plain_result(
+                    f"❌ 计划「{name}」已存在\n"
+                    "请先删除或用 /下线通知 计划 修改 来更改"
+                )
+                return
+
+            ok = self.schedule_store.add(
+                name=name,
+                day_type=day_type,
+                offline_time=offline_time,
+            )
+            if not ok:
+                yield event.plain_result("❌ 添加失败，请检查参数格式")
+                return
+
+            self._reload_scheduler_from_store()
+
+            yield event.plain_result(
+                f"✅ 已添加计划「{name}」\n"
+                f"   日期: {labels.get(day_type, day_type)} | 下线: {offline_time}\n"
+                f"（窗口与触发时机由全局设置控制，调度器已自动重载，新计划立即生效）"
+            )
             return
 
-        # 未知子命令 → 用法
+        # ── 删除 ──────────────────────────────
+        if sub in ("删除", "delete", "del", "rm", "移除"):
+            if len(parts) < 4:
+                yield event.plain_result("❌ 请指定计划名：/下线通知 计划 删除 <名称>")
+                return
+
+            name = " ".join(parts[3:])
+            if self.schedule_store.delete(name):
+                self._reload_scheduler_from_store()
+                yield event.plain_result(
+                    f"✅ 已删除计划「{name}」\n（调度器已自动重载）"
+                )
+            else:
+                yield event.plain_result(
+                    f"❌ 计划「{name}」不存在\n"
+                    f"用 /下线通知 计划 列表 查看所有计划"
+                )
+            return
+
+        # ── 启用 ──────────────────────────────
+        if sub in ("启用", "enable", "on"):
+            if len(parts) < 4:
+                yield event.plain_result("❌ 请指定计划名：/下线通知 计划 启用 <名称>")
+                return
+
+            name = " ".join(parts[3:])
+            if self.schedule_store.set_enabled(name, True):
+                self._reload_scheduler_from_store()
+                yield event.plain_result(f"✅ 已启用计划「{name}」")
+            else:
+                yield event.plain_result(f"❌ 计划「{name}」不存在")
+            return
+
+        # ── 禁用 ──────────────────────────────
+        if sub in ("禁用", "disable", "off"):
+            if len(parts) < 4:
+                yield event.plain_result("❌ 请指定计划名：/下线通知 计划 禁用 <名称>")
+                return
+
+            name = " ".join(parts[3:])
+            if self.schedule_store.set_enabled(name, False):
+                self._reload_scheduler_from_store()
+                yield event.plain_result(f"✅ 已禁用计划「{name}」（不会删除，可随时启用）")
+            else:
+                yield event.plain_result(f"❌ 计划「{name}」不存在")
+            return
+
+        # ── 修改 ──────────────────────────────
+        if sub in ("修改", "edit", "update", "modify", "改"):
+            if len(parts) < 6:
+                yield event.plain_result(
+                    "❌ 参数不足\n"
+                    "格式: /下线通知 计划 修改 <名称> <字段> <值>\n"
+                    "字段: 时间(HH:MM) / 日期(类型)\n"
+                    "中英文冒号均可，空格自动忽略\n"
+                    "示例: /下线通知 计划 修改 工作日下线 时间 22:30\n"
+                    "示例: /下线通知 计划 修改 周末晚安 日期 每天"
+                )
+                return
+
+            # 名称可能是多段（如 "工作日 下线"），字段和值是最后两部分
+            # 简单处理：取倒数第2个为字段，最后1个为值，其余为名称
+            field = parts[-2]
+            value = parts[-1]
+            name = " ".join(parts[3:-2])
+
+            if not name:
+                yield event.plain_result("❌ 请指定计划名称")
+                return
+
+            if not self.schedule_store.exists(name):
+                yield event.plain_result(f"❌ 计划「{name}」不存在")
+                return
+
+            kwargs = {}
+            if field in ("时间", "time"):
+                kwargs["offline_time"] = value
+            elif field in ("日期", "day", "type"):
+                dt = valid_keys.get(value) or value
+                if dt not in {"everyday", "weekday", "weekend"}:
+                    yield event.plain_result(
+                        f"❌ 不支持的日期类型「{value}」\n可选: 每天 / 工作日 / 周末"
+                    )
+                    return
+                kwargs["day_type"] = dt
+            else:
+                yield event.plain_result(
+                    f"❌ 不支持的字段「{field}」\n"
+                    "可修改: 时间 / 日期"
+                )
+                return
+
+            if self.schedule_store.update(name, **kwargs):
+                self._reload_scheduler_from_store()
+
+                # 构建友好的变更描述
+                field_labels = {
+                    "offline_time": "下线时间",
+                    "day_type": "日期类型",
+                }
+                changed = ", ".join(
+                    f"{field_labels.get(k, k)} → {v}"
+                    for k, v in kwargs.items()
+                )
+                yield event.plain_result(
+                    f"✅ 已更新计划「{name}」: {changed}\n（调度器已自动重载）"
+                )
+            else:
+                yield event.plain_result("❌ 修改失败")
+            return
+
+        # 未知子命令 → 帮助
         yield event.plain_result(
-            "用法：\n"
-            "  /下线通知 提示词              查看所有方案\n"
-            "  /下线通知 提示词 查看 <名称>   查看某方案\n"
-            "  /下线通知 提示词 保存 <名称>   保存当前提示词为方案\n"
-            "  /下线通知 提示词 切换 <名称>   激活某方案\n"
-            "  /下线通知 提示词 默认          回退到默认\n"
-            "  /下线通知 提示词 删除 <名称>   删除某方案"
+            "❓ 未知子命令\n\n"
+            "/下线通知 计划           查看帮助\n"
+            "/下线通知 计划 列表       查看所有计划\n"
+            "/下线通知 计划 添加 ...    添加计划\n"
+            "/下线通知 计划 删除 <名称> 删除计划\n"
+            "/下线通知 计划 启用 <名称> 启用计划\n"
+            "/下线通知 计划 禁用 <名称> 禁用计划\n"
+            "/下线通知 计划 修改 ...    修改计划"
         )
 
     # ── WebUI API ──────────────────────────────────────────
@@ -781,6 +1016,20 @@ class OfflineNotifyPlugin(Star):
             self._api_get_records,
             ["GET"],
             "获取通知发布记录"
+        )
+
+        self.context.register_web_api(
+            f"{prefix}/schedules",
+            self._api_get_schedules,
+            ["GET"],
+            "获取所有定时计划"
+        )
+
+        self.context.register_web_api(
+            f"{prefix}/schedules",
+            self._api_manage_schedule,
+            ["POST", "PUT", "DELETE"],
+            "管理定时计划（添加/修改/删除/启用/禁用）"
         )
 
     async def _api_get_status(self):
@@ -852,16 +1101,23 @@ class OfflineNotifyPlugin(Star):
             if not target_group:
                 return jsonify({"success": False, "error": "缺少 group_id"}), 400
 
+            self._ensure_caps()
+            ok, hint = validate_target_id_multi(self.capses, target_group)
+            if not ok:
+                return jsonify({"success": False, "error": hint}), 400
+
             now = datetime.now()
             offline_time = now.strftime("%H:%M")
             message = await self._generate_message(offline_time, 5)
 
+            self._warn_passive_window([target_group])
             success = await self.notifier.send_to_group(
-                target_group, message, self.platform_id
+                target_group, message, self.capses
             )
             return jsonify({
                 "success": success,
-                "message": "通知已发送" if success else "发送失败"
+                "platform": " | ".join(c.describe() for c in self.capses),
+                "message": "通知已发送" if success else "发送失败，请查看日志中的具体原因"
             })
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 500
@@ -904,5 +1160,123 @@ class OfflineNotifyPlugin(Star):
                     "offset": offset,
                 }
             })
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)}), 500
+
+    async def _api_get_schedules(self):
+        """API: 获取所有定时计划"""
+        from quart import jsonify
+
+        schedules = self.schedule_store.list_all()
+        return jsonify({
+            "success": True,
+            "data": {
+                "schedules": schedules,
+                "total": len(schedules),
+                "day_type_labels": ScheduleStore.DAY_TYPE_LABELS,
+            }
+        })
+
+    async def _api_manage_schedule(self):
+        """API: 管理定时计划（添加/修改/删除/启用/禁用）"""
+        from quart import jsonify, request
+
+        try:
+            method = request.method
+            data = await request.get_json() if method in ("POST", "PUT") else {}
+
+            if method == "POST":
+                name = data.get("name", "").strip()
+                action = (data.get("action") or "").strip()
+
+                if not name:
+                    return jsonify({"success": False, "error": "计划名称不能为空"}), 400
+
+                # bridge SDK 仅支持 GET/POST，故用 POST+action 承载 DELETE/PUT
+                if action == "delete":
+                    if self.schedule_store.delete(name):
+                        self._reload_scheduler_from_store()
+                        return jsonify({"success": True, "message": f"已删除计划「{name}」"})
+                    return jsonify({"success": False, "error": f"计划「{name}」不存在"}), 404
+
+                if action in ("enable", "disable"):
+                    ok = self.schedule_store.set_enabled(name, action == "enable")
+                    if ok:
+                        self._reload_scheduler_from_store()
+                        label = "启用" if action == "enable" else "禁用"
+                        return jsonify({"success": True, "message": f"已{label}计划「{name}」"})
+                    return jsonify({"success": False, "error": f"计划「{name}」不存在"}), 404
+
+                if action == "update":
+                    # 修改计划（bridge SDK 无 PUT，用 POST+action 承载）
+                    if not self.schedule_store.exists(name):
+                        return jsonify({"success": False, "error": f"计划「{name}」不存在"}), 404
+
+                    ok = self.schedule_store.update(name, **{
+                        k: v for k, v in data.items()
+                        if k in ("offline_time", "day_type", "float_range", "enabled")
+                    })
+                    if ok:
+                        self._reload_scheduler_from_store()
+                        return jsonify({"success": True, "message": f"已更新计划「{name}」"})
+                    return jsonify({"success": False, "error": "更新失败"}), 400
+
+                # 添加（默认）
+                day_type = data.get("day_type", "everyday")
+                offline_time = data.get("offline_time", "23:00")
+                try:
+                    float_range = int(data.get("float_range", 0) or 0)
+                except (TypeError, ValueError):
+                    float_range = 0
+
+                if self.schedule_store.exists(name):
+                    return jsonify({"success": False, "error": f"计划「{name}」已存在"}), 409
+
+                ok = self.schedule_store.add(
+                    name=name, day_type=day_type,
+                    offline_time=offline_time,
+                    float_range=max(0, min(float_range, 10)),
+                )
+                if ok:
+                    self._reload_scheduler_from_store()
+                    return jsonify({"success": True, "message": f"已添加计划「{name}」"})
+                return jsonify({"success": False, "error": "添加失败"}), 400
+
+            elif method == "PUT":
+                # 修改 / 启用 / 禁用
+                name = data.get("name", "").strip()
+                action = data.get("action", "update")
+
+                if not name:
+                    return jsonify({"success": False, "error": "计划名称不能为空"}), 400
+
+                if action == "enable":
+                    ok = self.schedule_store.set_enabled(name, True)
+                elif action == "disable":
+                    ok = self.schedule_store.set_enabled(name, False)
+                else:
+                    ok = self.schedule_store.update(name, **{
+                        k: v for k, v in data.items()
+                        if k in ("offline_time", "day_type", "enabled")
+                    })
+
+                if ok:
+                    self._reload_scheduler_from_store()
+                    return jsonify({"success": True, "message": f"已更新计划「{name}」"})
+                return jsonify({"success": False, "error": f"计划「{name}」不存在"}), 404
+
+            elif method == "DELETE":
+                # 删除
+                name = request.args.get("name", "").strip()
+                if not name:
+                    return jsonify({"success": False, "error": "计划名称不能为空"}), 400
+
+                if self.schedule_store.delete(name):
+                    self._reload_scheduler_from_store()
+                    return jsonify({"success": True, "message": f"已删除计划「{name}」"})
+                return jsonify({"success": False, "error": f"计划「{name}」不存在"}), 404
+
+            return jsonify({"success": False, "error": f"不支持的请求方法: {method}"}), 405
+
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 500

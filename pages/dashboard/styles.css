@@ -381,6 +381,36 @@ body {
   font-size: 14px;
 }
 
+.job-name-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 同一计划会拆成「监听开始」「监听结束」两个边界任务，靠徽章区分，避免看起来像重复条目 */
+.job-kind {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.job-kind.kind-open {
+  background: #fef3c7;
+  color: #b45309;
+}
+
+.job-kind.kind-close {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.job-kind.kind-other {
+  background: #f1f5f9;
+  color: #64748b;
+}
+
 .job-next {
   font-size: 12px;
   color: #7f8c8d;
@@ -452,4 +482,143 @@ body {
   .card {
     padding: 16px;
   }
+}
+
+/* ── Schedule Management ───────────────── */
+.schedules-toolbar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.schedule-form {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 16px;
+  margin-bottom: 12px;
+}
+
+.schedule-form .form-title {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 12px;
+  color: #1e293b;
+}
+
+.schedule-form .form-row {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.schedule-form .form-group {
+  min-width: 140px;
+  flex: 1;
+}
+
+.schedule-form .form-group select {
+  padding: 8px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  font-size: 14px;
+  outline: none;
+  color: #2c3e50;
+  background: #fff;
+}
+
+.schedule-form .form-group select:focus {
+  border-color: #4f46e5;
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.1);
+}
+
+.schedule-form .form-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.schedules-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.schedule-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px;
+  background: #f8fafc;
+  border-radius: 8px;
+  border-left: 3px solid #8b5cf6;
+  gap: 12px;
+}
+
+.schedule-item.disabled {
+  opacity: 0.6;
+  border-left-color: #94a3b8;
+}
+
+.schedule-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.schedule-name-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.schedule-name {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.schedule-detail {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.schedule-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.schedule-actions .btn {
+  font-size: 12px;
+  padding: 4px 10px;
+}
+
+.schedule-actions .btn-danger {
+  background: #fef2f2;
+  color: #dc2626;
+  border-color: #fecaca;
+}
+
+.schedule-actions .btn-danger:hover {
+  background: #fee2e2;
+}
+
+.badge {
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 10px;
+  font-weight: 500;
+}
+
+.badge-on {
+  background: #dcfce7;
+  color: #16a34a;
+}
+
+.badge-off {
+  background: #f1f5f9;
+  color: #64748b;
 }

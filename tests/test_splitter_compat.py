@@ -166,8 +166,8 @@ def test_normalize_unit():
 
 
 def test_llm_generator_path():
-    print("[单测] LLMGenerator.generate() 输出符合『16岁真人女孩』人设")
-    from core.llm_generator import LLMGenerator, BUILTIN_PROMPT, MANUAL_PROMPT
+    print("[单测] LLMGenerator.generate() 输出符合通用中立提示词规范")
+    from core.llm_generator import LLMGenerator, DEFAULT_PROMPT
     from core.notifier import split_long_message
 
     import re
@@ -189,7 +189,7 @@ def test_llm_generator_path():
     # 模拟一个符合人设的合规输出：夜里说去睡觉，带晚安/明天见祝福，
     # 不出现禁用词、不写「XX:XX下线」。
     class _Resp:
-        completion_text = "猪猪们，砂糖困得不行要去睡觉觉啦！都这个点咯，大家也早点歇着呀，明天见~晚安好梦！"
+        completion_text = "我暂时先离开一下，去处理点事情，回头再聊。"
 
     class _FakeProvider:
         async def text_chat_stream(self, prompt=None, **kw):
@@ -208,15 +208,15 @@ def test_llm_generator_path():
     gen = LLMGenerator(
         FakeCtx(),
         {"enable_llm_generation": True, "llm_provider_id": "p1",
-         "llm_timeout": 15, "llm_disable_thinking": True},
+         "llm_timeout": 15},
     )
     out = asyncio.run(gen.generate("23:00", 5, now=datetime(2026, 7, 27, 22, 55)))
 
-    # a) 人设：自称砂糖、含祝福，且不暴露身份/系统口吻
-    if "砂糖" in out and ("晚安" in out or "好梦" in out or "明天见" in out or "拜拜" in out):
-        _ok("generate() 输出含『砂糖』人设与道别祝福: %r" % out)
+    # a) 通用中立：输出非空、无特定人设（不含「砂糖」）、未暴露 AI/系统口吻
+    if out and "砂糖" not in out and not _has_forbidden(out):
+        _ok("generate() 输出为通用中立表述、无特定人设/禁用词: %r" % out)
     else:
-        _fail("generate() 输出缺少人设/祝福: %r" % out)
+        _fail("generate() 输出含人设或禁用词: %r" % out)
 
     if not _has_forbidden(out):
         _ok("generate() 输出未出现 AI/系统/下线 等禁用词")
@@ -241,31 +241,24 @@ def test_llm_generator_path():
     else:
         _fail("generate() 输出含结构性包裹: %r" % out)
 
-    # d) 提示词已包含 16 岁真人女孩「砂糖」人设 + 昼夜情境 + 禁用词约束
-    #    v1.5.0：恢复身份声明「真实的小姑娘」，自称改为「砂糖」（群友也叫"小砂糖"）
-    if ("16岁" in BUILTIN_PROMPT and "{time_context}" in BUILTIN_PROMPT
-            and "真实的小姑娘" in BUILTIN_PROMPT
-            and "小砂糖" in BUILTIN_PROMPT and "「砂糖」" in BUILTIN_PROMPT
-            and "小名叫" not in BUILTIN_PROMPT):
-        _ok("BUILTIN_PROMPT 含 16岁「砂糖」人设、昼夜情境、身份声明")
+    # d) 通用中立默认提示词：含情境/日期占位符、要求避免 AI/系统口吻与
+    #    「下线」字眼，且不含任何特定人设（砂糖/16岁/真实的小姑娘）。
+    #    自动通知与手动通知共用同一条 DEFAULT_PROMPT（即 custom_prompt 默认值）。
+    if ("{time_context}" in DEFAULT_PROMPT and "{date}" in DEFAULT_PROMPT
+            and "{day_of_week}" in DEFAULT_PROMPT):
+        _ok("DEFAULT_PROMPT 含 time_context/date/day_of_week 占位符")
     else:
-        _fail("BUILTIN_PROMPT 人设/情境/身份声明不符合预期")
-    if "25-35" not in BUILTIN_PROMPT and "12-18" not in BUILTIN_PROMPT:
-        _ok("BUILTIN_PROMPT 已移除死板字数约束（25-35/12-18）")
+        _fail("DEFAULT_PROMPT 缺少情境/日期占位符")
+    if ("砂糖" not in DEFAULT_PROMPT and "16岁" not in DEFAULT_PROMPT
+            and "真实的小姑娘" not in DEFAULT_PROMPT):
+        _ok("DEFAULT_PROMPT 不含特定人设（砂糖/16岁/真实的小姑娘）")
     else:
-        _fail("BUILTIN_PROMPT 仍含死板字数约束")
-    if ("下线" in BUILTIN_PROMPT and "AI" in BUILTIN_PROMPT
-            and "不要" in BUILTIN_PROMPT):
-        _ok("BUILTIN_PROMPT 已要求避免 AI/系统口吻与『下线』字眼")
+        _fail("DEFAULT_PROMPT 仍含特定人设设定")
+    if ("下线" in DEFAULT_PROMPT and "AI" in DEFAULT_PROMPT
+            and "不要" in DEFAULT_PROMPT):
+        _ok("DEFAULT_PROMPT 已要求避免 AI/系统口吻与『下线』字眼")
     else:
-        _fail("BUILTIN_PROMPT 缺少避免 AI/系统口吻的约束")
-    if ("16岁" in MANUAL_PROMPT and "AI" in MANUAL_PROMPT
-            and "真实的小姑娘" in MANUAL_PROMPT
-            and "小砂糖" in MANUAL_PROMPT and "「砂糖」" in MANUAL_PROMPT
-            and "小名叫" not in MANUAL_PROMPT):
-        _ok("MANUAL_PROMPT 同样含「砂糖」人设、身份声明与避免 AI 口吻约束")
-    else:
-        _fail("MANUAL_PROMPT 人设/身份声明/避免 AI 口吻不符合预期")
+        _fail("DEFAULT_PROMPT 缺少避免 AI/系统口吻的约束")
 
     # e) 脏输出（代码块包裹）应被规范化清洗，且仍保持合规、可分段
     class _RespFence:
@@ -280,7 +273,7 @@ def test_llm_generator_path():
     gen2 = LLMGenerator(
         FakeCtx2(),
         {"enable_llm_generation": True, "llm_provider_id": "p1",
-         "llm_timeout": 15, "llm_disable_thinking": True},
+         "llm_timeout": 15},
     )
     out2 = asyncio.run(gen2.generate("23:00", 5, now=datetime(2026, 7, 27, 22, 55)))
     if "```" not in out2 and not _has_forbidden(out2) and not _has_clock_offline(out2):
@@ -420,7 +413,7 @@ def test_send_to_group_self_split():
             self.calls.append((umo, text))
 
     ctx = _RecCtx()
-    notifier = GroupNotifier(ctx, {"max_retries": 1, "retry_interval_base": 0})
+    notifier = GroupNotifier(ctx, {"send_retries": 1, "send_retry_interval": 0})
     msg = ("猪猪们，砂糖要暂时下线啦～午饭时间到，该去填饱肚子咯！"
             "周一也要元气满满，记得好好吃饭呀～祝大家午安好梦，"
             "美滋滋地休息一下吧！晚安啦，好梦～。")
@@ -489,7 +482,7 @@ def test_send_to_group_no_split_template():
             self.calls.append((umo, text))
 
     ctx = _RecCtx()
-    notifier = GroupNotifier(ctx, {"max_retries": 1, "retry_interval_base": 0})
+    notifier = GroupNotifier(ctx, {"send_retries": 1, "send_retry_interval": 0})
 
     # 回退后的模板（含有 ！，若被误分段会变成 2 条）
     tpl = "注意~🌙 小砂糖即将下线休息，明天见！晚安~"
@@ -589,8 +582,8 @@ def test_prompt_store():
             _fail("初始状态异常: %r / active=%r" % (store.list_profiles(), store.get_active()))
 
         # upsert 两个方案
-        store.upsert("温柔版", "B1", "M1")
-        store.upsert("活泼版", "B2", "M2")
+        store.upsert("温柔版", "B1")
+        store.upsert("活泼版", "B2")
         if set(store.list_profiles()) == {"温柔版", "活泼版"}:
             _ok("upsert 两个方案后 list 正确")
         else:
@@ -598,16 +591,16 @@ def test_prompt_store():
 
         # get_profile
         prof = store.get_profile("温柔版")
-        if prof and prof["builtin_prompt"] == "B1" and prof["manual_prompt"] == "M1":
+        if prof and prof["prompt"] == "B1":
             _ok("get_profile 返回正确内容")
         else:
             _fail("get_profile 异常: %r" % prof)
 
         # 更新保留 created_at
         old_created = prof["created_at"]
-        store.upsert("温柔版", "B1-new", "M1-new")
+        store.upsert("温柔版", "B1-new")
         prof2 = store.get_profile("温柔版")
-        if (prof2["builtin_prompt"] == "B1-new"
+        if (prof2["prompt"] == "B1-new"
                 and prof2["created_at"] == old_created
                 and prof2["updated_at"] >= old_created):
             _ok("upsert 更新内容但保留 created_at")
@@ -636,7 +629,7 @@ def test_prompt_store():
         # 持久化：重新加载
         store2 = PromptStore(d)
         if (set(store2.list_profiles()) == {"温柔版", "活泼版"}
-                and store2.get_profile("活泼版")["manual_prompt"] == "M2"):
+                and store2.get_profile("活泼版")["prompt"] == "B2"):
             _ok("重新加载后方案持久化正确")
         else:
             _fail("持久化异常: %r" % store2.list_profiles())
@@ -663,57 +656,66 @@ def test_prompt_override():
     print("[单测] LLMGenerator 提示词三级覆盖（激活方案 > 配置 > 默认）")
     import tempfile
     import shutil
-    from core.llm_generator import LLMGenerator, BUILTIN_PROMPT, MANUAL_PROMPT
+    from core.llm_generator import LLMGenerator, DEFAULT_PROMPT
     from core.prompt_store import PromptStore
 
     class _FakeCtx:
         pass
 
-    # 1) 无配置无方案 → 内置默认
+    # 1) 无配置无方案 → 内置默认（单条 DEFAULT_PROMPT）
     gen0 = LLMGenerator(_FakeCtx(), {"enable_llm_generation": False})
-    b, m = gen0.get_effective_prompts()
-    if b is BUILTIN_PROMPT and m is MANUAL_PROMPT:
-        _ok("无配置无方案 → 内置默认")
+    p = gen0.get_effective_prompts()
+    if p is DEFAULT_PROMPT:
+        _ok("无配置无方案 → 内置默认（单条 DEFAULT_PROMPT）")
     else:
-        _fail("默认回退异常: b is BUILTIN=%s, m is MANUAL=%s"
-              % (b is BUILTIN_PROMPT, m is MANUAL_PROMPT))
+        _fail("默认回退异常: p is DEFAULT_PROMPT=%s" % (p is DEFAULT_PROMPT))
 
-    # 2) 配置自定义 → 覆盖默认
+    # 2) 配置自定义 custom_prompt → 覆盖默认（单条）
     gen1 = LLMGenerator(_FakeCtx(), {
         "enable_llm_generation": False,
-        "custom_builtin_prompt": "自定义B",
-        "custom_manual_prompt": "自定义M",
+        "custom_prompt": "自定义P",
     })
-    b1, m1 = gen1.get_effective_prompts()
-    if b1 == "自定义B" and m1 == "自定义M":
-        _ok("配置自定义覆盖默认")
+    p1 = gen1.get_effective_prompts()
+    if p1 == "自定义P":
+        _ok("配置自定义 custom_prompt 覆盖默认")
     else:
-        _fail("配置覆盖异常: %r %r" % (b1, m1))
+        _fail("配置覆盖异常: %r" % p1)
+
+    # 2b) 向后兼容旧键 custom_builtin_prompt / custom_manual_prompt
+    gen1b = LLMGenerator(_FakeCtx(), {
+        "enable_llm_generation": False,
+        "custom_builtin_prompt": "旧B",
+        "custom_manual_prompt": "旧M",
+    })
+    p1b = gen1b.get_effective_prompts()
+    if p1b == "旧B":
+        _ok("旧键 custom_builtin_prompt 仍可覆盖默认")
+    else:
+        _fail("旧键覆盖异常: %r" % p1b)
 
     # 3) 激活方案 → 覆盖配置
     d = tempfile.mkdtemp()
     try:
         store = PromptStore(d)
-        store.upsert("方案A", "方案A-B", "方案A-M")
+        store.upsert("方案A", "方案A-P")
         store.set_active("方案A")
         gen2 = LLMGenerator(_FakeCtx(), {
             "enable_llm_generation": False,
-            "custom_builtin_prompt": "自定义B",
-            "custom_manual_prompt": "自定义M",
+            "custom_prompt": "自定义P",
         }, prompt_store=store)
-        b2, m2 = gen2.get_effective_prompts()
-        if b2 == "方案A-B" and m2 == "方案A-M":
+        p2 = gen2.get_effective_prompts()
+        if p2 == "方案A-P":
             _ok("激活方案覆盖配置自定义")
         else:
-            _fail("方案覆盖异常: %r %r" % (b2, m2))
+            _fail("方案覆盖异常: %r" % p2)
 
         # 取消激活 → 回退到配置
         store.set_active(None)
-        b3, m3 = gen2.get_effective_prompts()
-        if b3 == "自定义B" and m3 == "自定义M":
+        p3 = gen2.get_effective_prompts()
+        if p3 == "自定义P":
             _ok("取消激活后回退到配置自定义")
         else:
-            _fail("回退配置异常: %r %r" % (b3, m3))
+            _fail("回退配置异常: %r" % p3)
     finally:
         shutil.rmtree(d, ignore_errors=True)
 

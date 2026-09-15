@@ -13,17 +13,25 @@ from typing import Optional
 from astrbot.api import logger
 from astrbot.api.event import MessageChain
 
+from .platform_compat import (
+    PlatformCaps,
+    validate_target_id,
+    validate_target_id_multi,
+    normalize_capses,
+)
+
 
 class SchedulerMonitor:
     """调度器自我监控器"""
 
-    def __init__(self, context, scheduler, config: dict):
+    def __init__(self, context, scheduler, config: dict, caps: Optional[PlatformCaps] = None):
         """初始化监控器
 
         Args:
             context: AstrBot Context 对象
             scheduler: NotificationScheduler 实例
             config: monitor_config 配置节
+            caps: 平台能力画像列表。为 None 时按 config["platform_ids"] 构造。
         """
         self.context = context
         self.scheduler = scheduler
@@ -32,7 +40,10 @@ class SchedulerMonitor:
         self.heartbeat_timeout = config.get("heartbeat_timeout", 180)
         self.alert_admin_group = config.get("alert_admin_group", "")
         self.alert_qq = config.get("alert_qq", "")
-        self.platform_id = config.get("platform_id", "小砂糖")
+        raw = caps if caps is not None else config.get("platform_ids", [])
+        self.capses = normalize_capses(raw)
+        self.caps = self.capses[0] if self.capses else PlatformCaps(platform_id="")
+        self.platform_id = self.caps.platform_id
 
         self._task: Optional[asyncio.Task] = None
         self._running = False
@@ -137,29 +148,77 @@ class SchedulerMonitor:
 
         alert_text = f"【离线通知系统告警】\n\n{message}\n\n请检查 AstrBot 插件状态。"
 
-        # 发送告警到管理员群
+        # 多平台：对配置的每个平台实例都尝试发送告警。
+        # 注意：QQ 官方协议下群消息需要 5 分钟内的被动 msg_id，深夜告警多半发不出去，
+        # 因此私聊（C2C 主动推送不受 msg_id 限制）才是官方协议下的可靠告警通道。
         if self.alert_admin_group:
-            try:
-                umo = f"{self.platform_id}:GroupMessage:{self.alert_admin_group}"
-                chain = MessageChain().message(alert_text)
-                await self.context.send_message(umo, chain)
-                logger.info(
-                    f"[离线通知] 已发送告警到群 {self.alert_admin_group}"
-                )
-            except Exception as e:
-                logger.error(f"[离线通知] 告警发送失败(群): {e}")
-
-        # 发送告警到QQ私聊
+            await self._send_alert_multi(
+                self.alert_admin_group, alert_text,
+                channel="群", label="告警群号", friend=False,
+            )
         if self.alert_qq:
-            try:
-                umo = f"{self.platform_id}:FriendMessage:{self.alert_qq}"
-                chain = MessageChain().message(alert_text)
-                await self.context.send_message(umo, chain)
-                logger.info(
-                    f"[离线通知] 已发送告警到QQ {self.alert_qq}"
-                )
-            except Exception as e:
-                logger.error(f"[离线通知] 告警发送失败(QQ): {e}")
+            await self._send_alert_multi(
+                self.alert_qq, alert_text,
+                channel="私聊", label="告警QQ/openid", friend=True,
+            )
 
         # 设置冷却时间
         self._alert_cooldown = now + self._alert_cooldown_seconds
+
+    async def _send_alert_multi(self, target, text, *, channel, label, friend) -> None:
+        """对一个告警目标，在每一个形态匹配的平台实例上都发送一遍。
+
+        只要有一个平台实例发成功即记为已送达；全部平台都失败才提示。
+        """
+        ok, hint = validate_target_id_multi(self.capses, target, label=label)
+        if not ok:
+            logger.error(f"[离线通知] 告警发送跳过({channel}): {hint}")
+            return
+        any_sent = False
+        for caps in self.capses:
+            ok2, _ = validate_target_id(caps, target, label=label)
+            if not ok2:
+                continue  # 该平台形态不符（如 QQ 官方下收到数字群号），跳过本平台
+            umo = caps.friend_umo(target) if friend else caps.group_umo(target)
+            sent = await self._send_alert(
+                umo, text, target=target, channel=channel, label=label, caps=caps
+            )
+            any_sent = any_sent or sent
+        if not any_sent:
+            logger.error(
+                f"[离线通知] 告警发送失败({channel}): 所有匹配平台均未能送达"
+            )
+
+    async def _send_alert(self, umo: str, text: str, *, target: str,
+                          channel: str, label: str,
+                          caps: Optional[PlatformCaps] = None) -> bool:
+        """发送一条告警，带平台标识校验与真实成败判定。
+
+        改造前的问题：``context.send_message`` 找不到平台实例时只返回 False 不抛异常，
+        旧代码因此会打出「已发送告警」的假日志。这里显式检查返回值。
+        """
+        caps = caps or self.caps
+        ok, hint = validate_target_id(caps, target, label=label)
+        if not ok:
+            logger.error(f"[离线通知] 告警发送跳过({channel}): {hint}")
+            return False
+
+        try:
+            chain = MessageChain().message(text)
+            if caps.force_plain_text and hasattr(chain, "use_markdown"):
+                try:
+                    chain.use_markdown(False)
+                except Exception:  # pragma: no cover
+                    pass
+            ret = await self.context.send_message(umo, chain)
+            if ret is False:
+                logger.error(
+                    f"[离线通知] 告警发送失败({channel}): 找不到平台实例 "
+                    f"'{caps.platform_id}'，消息未发出（UMO={umo}）"
+                )
+                return False
+            logger.info(f"[离线通知] 已发送告警到{channel} {target}")
+            return True
+        except Exception as e:
+            logger.error(f"[离线通知] 告警发送失败({channel}): {e}")
+            return False

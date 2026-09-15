@@ -1,35 +1,12 @@
 """
-LLM 通知内容生成器 - 调用对话模型生成多样化、自然的下线通知
+LLM 通知内容生成器 - 调用对话模型生成多样化、自然的下线通知。
 
-核心功能:
-- 内置提示词引导模型扮演 16岁真人女孩「砂糖」自然道别
-- 包含必要信息，但不暴露 AI / 系统身份，也不写「XX:XX 下线」字眼
-- 支持超时控制和模板回退
-- 记录每次生成的统计信息
-- 提示词「明置」：支持配置自定义 + 命名方案库覆盖（见 get_effective_prompts）
-
-调用方式:
-  generator = LLMGenerator(context, config)
-  message = await generator.generate(offline_time="23:00", countdown_minutes=5)
-
-实现要点（v 人设重构 · 思考模式提速 · 提示词明置）:
-  1) 人设：提示词让模型扮演一个 16岁的活泼可爱真人女孩「砂糖」
-     （群友也叫她"小砂糖"），自然和大家道别；不出现「下线 / AI /
-     机器人 / 通知 / 系统」等暴露身份或像后台公告的字眼，也不写
-     「XX:XX 下线」这种带具体时刻的写法。白天说有事/想玩，晚上说
-     去睡觉。
-  2) 提速真因：deepseek-v4 系列默认开启「思考/推理模式」，模型会
-     先花十几秒做 reasoning 才吐字。普通聊天是流式逐步显示，用户
-     感知不到这十几秒；而本插件要等【完整】响应才发送，于是整体
-     被拖到 20s+。修复：仅对本次调用临时关闭思考模式
-     （thinking={type:disabled}，等同旧 deepseek-chat 的非思考路径），
-     调用后还原，不影响普通聊天。
-  3) 调用方式：与普通聊天同源的流式 text_chat_stream，逐块收集
-     completion_text；保留整体超时兜底（默认 90s）、重试与模板回退。
-  4) 提示词明置（v1.5.0）：提示词不再只硬编码——管理员可在
-     _conf_schema.json 的 custom_builtin_prompt / custom_manual_prompt
-     中填写自定义提示词（明置编辑），也可用 PromptStore 保存多套命名
-     方案、互不干扰地切换。三级优先级：激活方案 > 配置自定义 > 内置默认。
+要点:
+- 默认提示词 DEFAULT_PROMPT 为通用、中立的功能引导，不含任何特定
+  人设 / 语气风格，仅规范基本指令与输出形式；自动与手动通知共用同一条。
+- 超时兜底 + 重试（retry_config.llm_retries）+ 模板回退。
+- 提示词「明置」：get_effective_prompts() 三级优先级
+  （激活命名方案 > 配置 custom_prompt > 内置 DEFAULT_PROMPT）。
 """
 
 import asyncio
@@ -40,42 +17,22 @@ from astrbot.api import logger
 
 from .splitter_compat import normalize_for_splitter
 
-# 用于「临时关闭思考模式」的补丁哨兵：无法补丁时返回它，还原时跳过。
-_NO_PATCH = object()
 
+# 内置默认提示词（兜底）：通用、中立的功能引导，不含任何特定人设 /
+# 语气风格，仅规范基本指令与输出形式。自动与手动通知共用同一条。
+# 这是 get_effective_prompts() 的最低优先级兜底；配置项 custom_prompt
+# 留空时即使用本默认，填写后覆盖。
+DEFAULT_PROMPT = """你是一个用于生成「暂时离开群聊通知」的文本生成助手。当触发方需要暂时离开当前群聊时，你会生成一段简洁的离场说明，由触发方发送到对应群聊。
 
-# 内置默认提示词 - 让模型扮演 16岁真人女孩「砂糖」，自然地和大家道别。
-# 不出现「下线 / AI / 机器人 / 通知 / 系统」等暴露身份或像后台公告的字眼，
-# 也不写「XX:XX 下线」这种带具体时刻的写法；昼夜情境由 {time_context} 注入。
-# 这是 get_effective_prompts() 三级解析中的最低优先级（兜底默认）。
-BUILTIN_PROMPT = """你是一个16岁的可爱、活泼女生「砂糖」（群友也叫你"小砂糖"），在 QQ 群里和大家像好朋友一样相处。你不是 AI、不是机器人、不是助手，你就是一个真实的小姑娘，只是刚好在群里陪大家玩。
+系统会在调用时注入以下上下文（请勿在消息中复述变量名或占位符）：
+- {time_context}：当前离场的情境说明（例如：准备去休息 / 临时有事 / 想稍作停顿），据此自然说明离开原因。
+- {date} {day_of_week}：当前日期与星期。
 
-事情是这样的：{time_context}，所以你这会儿要暂时离开一下，想跟大家自然地说声拜拜。
-
-请生成一句或两句你临走前会在群里说的话，要求：
-1. 用你自己的口吻，像一个真实的 16岁女孩在跟朋友道别：活泼、亲切、口语化，可以加「呀、啦、咯、哦、~」这类语气词。
-2. 自然地说明你要去干嘛（参考：{time_context} 里的原因，比如去睡觉、有点事、想出去玩），不要用「下线、退出、离开群、挂机」这类像系统 / 后台的词。
-3. 绝对不要出现这些词：AI、人工智能、机器人、助手、通知、系统、下线、离线、退出登录、挂机。也不要写「XX:XX 下线」这种带具体时刻的写法。
-4. 可以顺带跟群里小伙伴道个晚安 / 明天见 / 回头聊，但别太正式、别像公告。
-5. 简短自然就好，一两句，别写太长。
-6. 纯文本输出，不要任何 Markdown、不要 <think> 标签、不要加前缀或解释。
-7. 只输出你要说的那句 / 两句道别，不要其他内容。
-
-当前日期: {date} {day_of_week}"""
-
-# 手动生成场景专用提示词 — 管理员手动触发，非自动调度
-MANUAL_PROMPT = """你是一个16岁的可爱、活泼女生「砂糖」（群友也叫你"小砂糖"），在 QQ 群里和大家像好朋友一样相处。你不是 AI、不是机器人、不是助手，你就是一个真实的小姑娘，只是刚好在群里陪大家玩。
-
-这会儿你想暂时离开一下，跟大家自然地说声拜拜（就当是临时想跟小伙伴说声，不用提倒计时或几点）。
-
-请生成一句或两句你临走前会在群里说的话，要求：
-1. 用你自己的口吻，像一个真实的 16岁女孩在跟朋友道别：活泼、亲切、口语化，可以加「呀、啦、咯、哦、~」这类语气词。
-2. 自然地说明你要去干嘛（比如去睡觉、有点事、想出去玩），不要用「下线、退出、离开群、挂机」这类像系统 / 后台的词。
-3. 绝对不要出现这些词：AI、人工智能、机器人、助手、通知、系统、下线、离线、退出登录、挂机。也不要写「XX:XX 下线」这种带具体时刻的写法。
-4. 可以顺带道个晚安 / 明天见 / 回头聊，但别太正式、别像公告。
-5. 简短自然就好，一两句，别写太长。
-6. 纯文本输出，不要任何 Markdown、不要 <think> 标签、不要加前缀或解释。
-7. 只输出你要说的那句 / 两句道别，不要其他内容。
+生成要求：
+1. 内容聚焦「暂时离开」这一事实，用一两句话说明接下来要去做的事（参照 time_context 的情境），避免使用「下线 / 离线 / 退出 / 挂机 / 系统 / 通知 / 机器人 / AI / 助手」等词汇或后台公告式口吻。
+2. 保持中立、平实的表述，不设定任何特定人设、性格、年龄或语气风格。
+3. 纯文本输出，不使用 Markdown、不添加前缀或解释、不包含 <think> 标签。
+4. 仅输出最终要发送的那一两句话，不要输出其他内容。
 
 当前日期: {date} {day_of_week}"""
 
@@ -100,38 +57,42 @@ class LLMGenerator:
             return "现在是下午，你有点事要忙，或者想溜出去玩"
         return "现在是上午 / 中午，你有点事要忙"
 
-    def __init__(self, context, config: dict, prompt_store=None):
+    def __init__(self, context, config: dict, prompt_store=None,
+                 retry_config: dict = None):
         """初始化 LLM 生成器
 
         Args:
             context: AstrBot Context 对象
             config: llm_generation_config 配置节
             prompt_store: 可选的 PromptStore 命名方案库（用于多方案覆盖）
+            retry_config: retry_config 配置节（提供 LLM 生成重试参数）
         """
         self.context = context
         self.config = config
         self.enabled = config.get("enable_llm_generation", True)
         self.provider_id = config.get("llm_provider_id", "")
-        # 整体超时：放宽到 40~240s。
-        # 这是此前「全部超时」的真凶——旧阈值 8~12s 过早取消了一次
-        # 较慢的 DeepSeek 响应（首字/完整响应常需 10~20s）。
-        # 普通聊天没这层紧 timeout 包裹，所以它能正常拿到结果。
-        # 这里给足余量，避免再次误掐框架本可完成的调用。
+        # 整体超时：放宽到 40~240s，避免误掐框架本可完成的较慢响应。
         raw = int(config.get("llm_timeout", 90) or 90)
         self.timeout = min(max(raw, 40), 240)
-        # 自动重试：单次失败后，等待 retry_delay 秒再整体重试。
-        self.max_retry = int(config.get("llm_max_retry", 2) or 0)
-        self.retry_delay = int(config.get("llm_retry_delay", 3) or 3)
+        # LLM 生成调用重试：首次超时（多半是 provider 注册表重连）后，
+        # 等待 retry_delay 秒再试。优先读 retry_config.llm_retries，
+        # 向后兼容旧键 llm_max_retry。
+        rc = retry_config or {}
+        self.max_retry = int(
+            rc.get("llm_retries", config.get("llm_max_retry", 2)) or 0)
+        self.retry_delay = int(
+            rc.get("llm_retry_interval", config.get("llm_retry_delay", 3)) or 3)
         self.fallback_to_template = config.get("fallback_to_template", True)
-        # 关闭 DeepSeek 思考模式（仅对本次插件调用生效，调用后还原）。
-        # 这是把通知生成从 20s+ 降到几秒的关键：v4 系列默认开启
-        # 思考，会先 reasoning 十几秒才吐字，而本插件要等完整响应。
-        self.disable_thinking = bool(config.get("llm_disable_thinking", True))
 
-        # 提示词「明置」（v1.5.0）：配置自定义优先于内置默认；
+        # 提示词「明置」：配置 custom_prompt 优先于内置默认；
         # 命名方案（prompt_store）优先级最高。见 get_effective_prompts()。
-        self.custom_builtin = (config.get("custom_builtin_prompt") or "").strip()
-        self.custom_manual = (config.get("custom_manual_prompt") or "").strip()
+        # 向后兼容旧键 custom_builtin_prompt / custom_manual_prompt。
+        self.custom_prompt = (
+            config.get("custom_prompt")
+            or config.get("custom_builtin_prompt")
+            or config.get("custom_manual_prompt")
+            or ""
+        ).strip()
         self.prompt_store = prompt_store
 
         # 统计信息
@@ -147,36 +108,32 @@ class LLMGenerator:
         }
 
     def get_effective_prompts(self):
-        """返回当前生效的 (builtin, manual) 提示词模板。
+        """返回当前生效的提示词（单条，自动与手动通知共用）。
 
         三级优先级（高 → 低）：
           1. 已激活的命名方案（PromptStore 中 set_active 的方案，整体覆盖）；
-          2. 配置自定义（custom_builtin_prompt / custom_manual_prompt，明置编辑）；
-          3. 内置默认（BUILTIN_PROMPT / MANUAL_PROMPT 常量，即「砂糖」人设）。
-
-        这样管理员既能在配置面板里快速改提示词（明置），也能把多套
-        提示词存成命名方案、互不干扰地切换，满足多用户/多场景需求。
+          2. 配置自定义 custom_prompt（明置编辑）；
+          3. 内置默认 DEFAULT_PROMPT（通用、中立的功能引导）。
 
         Returns:
-            (builtin_template, manual_template)
+            str: 生效的提示词模板
         """
-        builtin_tpl, manual_tpl = BUILTIN_PROMPT, MANUAL_PROMPT
+        prompt = DEFAULT_PROMPT
         # 2) 配置自定义（明置）
-        if self.custom_builtin:
-            builtin_tpl = self.custom_builtin
-        if self.custom_manual:
-            manual_tpl = self.custom_manual
-        # 1) 命名方案（最高优先级，整体覆盖）
+        if self.custom_prompt:
+            prompt = self.custom_prompt
+        # 1) 命名方案（最高优先级，整体覆盖；兼容旧方案库的双字段）
         if self.prompt_store is not None:
             active = self.prompt_store.get_active()
             if active:
                 prof = self.prompt_store.get_profile(active)
                 if prof:
-                    if prof.get("builtin_prompt"):
-                        builtin_tpl = prof["builtin_prompt"]
-                    if prof.get("manual_prompt"):
-                        manual_tpl = prof["manual_prompt"]
-        return builtin_tpl, manual_tpl
+                    p = (prof.get("prompt")
+                         or prof.get("builtin_prompt")
+                         or prof.get("manual_prompt"))
+                    if p:
+                        prompt = p
+        return prompt
 
     async def generate(self, offline_time: str, countdown_minutes: int,
                        now: datetime = None, is_manual: bool = False) -> Optional[str]:
@@ -184,14 +141,14 @@ class LLMGenerator:
 
         走与普通聊天完全同源的流式路径 provider.text_chat_stream
         （同一 provider 实例、同一底层方法），因此沿用框架已验证
-        可用的代理/信任环境/超时配置；并在本次调用临时关闭思考
-        模式以提速（调用后还原，不影响普通聊天）。
+        可用的代理/信任环境/超时配置。思考模式是否开启交由用户在
+        模型 / 提供商侧自行配置，本插件不再干预。
 
         Args:
             offline_time: 下线时间 (HH:MM)
             countdown_minutes: 剩余分钟数
             now: 当前时间，默认 datetime.now()
-            is_manual: 是否手动触发（True=手动场景，使用 manual 提示词）
+            is_manual: 是否手动触发（仅用于日志/统计区分，提示词共用同一条）
 
         Returns:
             str | None: 生成的通知文本，失败返回 None
@@ -210,9 +167,8 @@ class LLMGenerator:
         day_of_week = self.WEEKDAY_NAMES.get(now.weekday(), str(now.weekday()))
         date_str = now.strftime("%Y-%m-%d")
 
-        # 根据场景选择提示词（支持配置/命名方案覆盖，见 get_effective_prompts）
-        builtin_tpl, manual_tpl = self.get_effective_prompts()
-        prompt_template = manual_tpl if is_manual else builtin_tpl
+        # 自动与手动通知共用同一条生效提示词（见 get_effective_prompts）
+        prompt_template = self.get_effective_prompts()
         time_context = self._time_context(now)
         prompt = prompt_template.format(
             date=date_str,
@@ -244,22 +200,11 @@ class LLMGenerator:
                 if prov is None:
                     raise RuntimeError(f"Provider {self.provider_id} 不存在")
 
-                # 提速关键：deepseek-v4 默认开启「思考/推理模式」，会先花
-                # 十几秒做 reasoning 才吐字；普通聊天因流式逐步显示，
-                # 用户感知不到这十几秒，而本插件要等【完整】响应才发送，
-                # 于是整体被 reasoning 拖到 20s+。这里仅对本次调用临时
-                # 关闭思考模式（等同旧 deepseek-chat 的非思考路径），
-                # 调用后还原，不影响普通聊天。
-                saved_think = _patch_thinking(prov, self.disable_thinking)
-                try:
-                    # 流式收集：连接即返回，不阻塞等完整响应
-                    text = await asyncio.wait_for(
-                        self._stream_collect(prov, prompt),
-                        timeout=self.timeout,
-                    )
-                finally:
-                    if saved_think is not _NO_PATCH:
-                        _restore_thinking(prov, saved_think)
+                # 流式收集：连接即返回，不阻塞等完整响应
+                text = await asyncio.wait_for(
+                    self._stream_collect(prov, prompt),
+                    timeout=self.timeout,
+                )
 
                 text = (text or "").strip()
                 if text:
@@ -371,42 +316,3 @@ class LLMGenerator:
             avg_time = self._stats["total_time_ms"] / self._stats["success_calls"]
         stats["avg_time_ms"] = round(avg_time, 1)
         return stats
-
-
-def _patch_thinking(prov, disable: bool):
-    """临时在 provider 的 custom_extra_body 注入 / 移除 thinking=disabled。
-
-    仅影响本次插件调用；调用方须在 finally 中调用 _restore_thinking 还原。
-    deepseek-v4 默认开启思考模式（十几秒 reasoning 才吐字），关闭后
-    走非思考路径，单次生成从 20s+ 降到几秒。返回原 thinking 值
-    （或 _NO_PATCH 表示无法补丁）。
-    """
-    cfg = getattr(prov, "provider_config", None)
-    if not isinstance(cfg, dict):
-        return _NO_PATCH
-    eb = cfg.get("custom_extra_body")
-    if not isinstance(eb, dict):
-        eb = {}
-        cfg["custom_extra_body"] = eb
-    saved = eb.get("thinking", _NO_PATCH)
-    if disable:
-        eb["thinking"] = {"type": "disabled"}
-    else:
-        eb.pop("thinking", None)
-    return saved
-
-
-def _restore_thinking(prov, saved):
-    """还原 _patch_thinking 对 provider 的临时修改。"""
-    if saved is _NO_PATCH:
-        return
-    cfg = getattr(prov, "provider_config", None)
-    if not isinstance(cfg, dict):
-        return
-    eb = cfg.get("custom_extra_body")
-    if not isinstance(eb, dict):
-        return
-    if saved is _NO_PATCH:
-        eb.pop("thinking", None)
-    else:
-        eb["thinking"] = saved

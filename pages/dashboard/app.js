@@ -2,7 +2,16 @@
  * AI下线通知系统 - WebUI 管理面板
  */
 
-const API_BASE = "/astrbot_plugin_offline_notify";
+// 插件 Web API 通过框架 bridge SDK 调用：window.AstrBotPluginPage.apiGet/apiPost，
+// 由父窗口（WebUI 主应用）代理请求并自动附加 dashboard JWT。
+// endpoint 传「相对路径」（如 "/status"），父窗口自动补全为
+// /api/v1/plugins/extensions/astrbot_plugin_offline_notify/<endpoint>。
+// 直接 fetch 网关会因插件页面 iframe 内拿不到 token 而 401。
+//
+// ⚠️ bridge 会自动剥壳：父窗口返回 (response.data) ?? response。
+// 即后端返回 {"success":true,"data":X} 时，本页拿到的是 X 本身（无 success/data 外壳）；
+// 后端返回 {"success":true,"message":...}（无 data 字段）时，本页拿到完整对象。
+// 因此判断成功不能用 data.success，而要直接检查业务字段。
 
 // ── DOM 元素 ──────────────────────────────────────
 
@@ -45,6 +54,19 @@ const $refreshRecordsBtn = $("#refreshRecordsBtn");
 const $recordsCount = $("#recordsCount");
 const $recordsBody = $("#recordsBody");
 
+// Schedules
+const $schedulesList = $("#schedulesList");
+const $refreshSchedulesBtn = $("#refreshSchedulesBtn");
+const $addScheduleBtn = $("#addScheduleBtn");
+const $scheduleForm = $("#scheduleForm");
+const $scheduleFormTitle = $("#scheduleFormTitle");
+const $cancelScheduleBtn = $("#cancelScheduleBtn");
+const $saveScheduleBtn = $("#saveScheduleBtn");
+const $schedName = $("#schedName");
+const $schedDayType = $("#schedDayType");
+const $schedTime = $("#schedTime");
+const $schedFloat = $("#schedFloat");
+
 // Toast
 const $toast = $("#toast");
 
@@ -63,11 +85,19 @@ function showToast(message, type = "info") {
 
 // ── API 请求 ──────────────────────────────────────
 
-async function apiGet(path) {
+function getBridge() {
+  const b = window.AstrBotPluginPage;
+  if (!b || typeof b.apiGet !== "function" || typeof b.apiPost !== "function") {
+    return null;
+  }
+  return b;
+}
+
+async function apiGet(path, params) {
   try {
-    const resp = await fetch(`${API_BASE}${path}`);
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    return await resp.json();
+    const bridge = getBridge();
+    if (!bridge) throw new Error("插件桥接未就绪");
+    return await bridge.apiGet(path, params);
   } catch (err) {
     showToast(`请求失败: ${err.message}`, "error");
     return null;
@@ -76,13 +106,9 @@ async function apiGet(path) {
 
 async function apiPost(path, body) {
   try {
-    const resp = await fetch(`${API_BASE}${path}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    return await resp.json();
+    const bridge = getBridge();
+    if (!bridge) throw new Error("插件桥接未就绪");
+    return await bridge.apiPost(path, body);
   } catch (err) {
     showToast(`请求失败: ${err.message}`, "error");
     return null;
@@ -125,24 +151,55 @@ function renderStats(data) {
   $sendStats.textContent = `${data.total_sent} / ${data.total_failed}`;
 }
 
+// 每个计划拆成「监听开始(open)」+「监听结束(close)」两个 cron 边界任务，二者 name 相同。
+// 真正的发送完全靠窗口内命中目标群消息、借被动 msg_id 搭便车——窗口内没消息就发不出，且无任何兜底补发。
+// WebUI 端按「计划名」聚合，每行显示一个计划（含监听开始 / 监听结束两个友好时间）。
+
+// 把后端返回的 "2026-09-12 22:30:00+08:00" 格式化为 "今天 09-12 22:30"（服务器时区 +08:00）
+function fmtNextRun(s) {
+  if (!s) return "暂无";
+  const d = new Date(String(s).replace(" ", "T"));
+  if (isNaN(d.getTime())) return s;
+  const pad = (n) => String(n).padStart(2, "0");
+  const datePart = `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const now = new Date();
+  const today0 = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const that0 = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const diff = Math.round((that0 - today0) / 86400000);
+  const rel = diff === 0 ? "今天 " : diff === 1 ? "明天 " : diff === 2 ? "后天 " : "";
+  return rel + datePart;
+}
+
 function renderJobs(data) {
   if (!data.jobs || data.jobs.length === 0) {
     $jobsList.innerHTML = '<div class="empty-state">暂无定时任务</div>';
     return;
   }
 
-  $jobsList.innerHTML = data.jobs
-    .map(
-      (job) => `
+  // 按计划名聚合 open / close 两个 cron
+  const byName = {};
+  for (const job of data.jobs) {
+    const jid = job.id || "";
+    const kind = job.kind ||
+      (jid.includes("_open_") ? "open" : jid.includes("_close_") ? "close" : "other");
+    if (!byName[job.name]) byName[job.name] = { name: job.name, open: null, close: null };
+    if (kind === "open") byName[job.name].open = job;
+    else if (kind === "close") byName[job.name].close = job;
+  }
+
+  $jobsList.innerHTML = Object.values(byName)
+    .map((g) => `
     <div class="job-item">
       <div class="job-info">
-        <span class="job-name">${escapeHtml(job.name)}</span>
-        <span class="job-next">下次触发: ${job.next_run || "暂无"}</span>
+        <div class="job-name-line">
+          <span class="job-name">${escapeHtml(g.name)}</span>
+          <span class="job-kind kind-open" title="按计划在窗口内监听：窗口内命中目标群消息即借被动 msg_id 发送；窗口内没消息则当天不发送，无兜底补发">计划</span>
+        </div>
+        <span class="job-next">监听开始: ${fmtNextRun(g.open && g.open.next_run)}</span>
+        <span class="job-next">监听结束: ${fmtNextRun(g.close && g.close.next_run)}</span>
       </div>
       <span class="job-status active">活跃</span>
-    </div>
-  `
-    )
+    </div>`)
     .join("");
 }
 
@@ -163,9 +220,10 @@ async function previewMessage() {
   $previewBtn.disabled = false;
   $previewBtn.textContent = "生成预览";
 
-  if (data && data.success) {
-    const { title, body, footer } = data.data;
-    let html = `<div class="preview-message"><strong>${escapeHtml(title)}</strong>\n\n${escapeHtml(body)}`;
+  // bridge 已剥壳：data 即 {title, body, footer}（title 允许为空串，故判 body）
+  if (data && typeof data.body === "string") {
+    const { title, body, footer } = data;
+    let html = `<div class="preview-message"><strong>${escapeHtml(title || "")}</strong>\n\n${escapeHtml(body)}`;
     if (footer) {
       html += `\n\n${escapeHtml(footer)}`;
     }
@@ -197,8 +255,9 @@ async function llmPreviewMessage() {
   $llmPreviewBtn.disabled = false;
   $llmPreviewBtn.textContent = "LLM 生成";
 
-  if (data && data.success && data.data) {
-    const { text, source, avg_time_ms } = data.data;
+  // bridge 已剥壳：data 即 {text, source, avg_time_ms, error?}
+  if (data && typeof data.text === "string") {
+    const { text, source, avg_time_ms } = data;
     let floatInfo = "";
     if (floatRange > 0) {
       floatInfo = `\n<i>浮动范围: ±${floatRange} 分钟</i>`;
@@ -211,7 +270,7 @@ async function llmPreviewMessage() {
       $llmSourceTag.textContent = "LLM 生成";
       $llmSourceTag.className = "source-tag llm";
     } else {
-      $llmSourceTag.textContent = `模板回退 (${data.data.error || ""})`;
+      $llmSourceTag.textContent = `模板回退 (${data.error || ""})`;
       $llmSourceTag.className = "source-tag template";
     }
     $llmTimeInfo.textContent = avg_time_ms ? `平均耗时 ${avg_time_ms}ms` : "";
@@ -260,13 +319,14 @@ async function refreshRecords() {
   $refreshRecordsBtn.disabled = true;
   $refreshRecordsBtn.textContent = "加载中...";
 
-  const data = await apiGet("/records?limit=20");
+  const data = await apiGet("/records", { limit: 20 });
 
   $refreshRecordsBtn.disabled = false;
   $refreshRecordsBtn.textContent = "刷新记录";
 
-  if (data && data.success && data.data) {
-    renderRecords(data.data.records, data.data.total);
+  // bridge 已剥壳：data 即 {records, total, limit, offset}
+  if (data && Array.isArray(data.records)) {
+    renderRecords(data.records, data.total);
     showToast("记录已刷新", "success");
   }
 }
@@ -333,6 +393,12 @@ $llmPreviewBtn.addEventListener("click", llmPreviewMessage);
 $testSendBtn.addEventListener("click", testSend);
 $refreshRecordsBtn.addEventListener("click", refreshRecords);
 
+// Schedule management
+$refreshSchedulesBtn.addEventListener("click", refreshSchedules);
+$addScheduleBtn.addEventListener("click", showAddForm);
+$cancelScheduleBtn.addEventListener("click", hideForm);
+$saveScheduleBtn.addEventListener("click", saveSchedule);
+
 // 回车触发测试发送
 $testGroupId.addEventListener("keydown", (e) => {
   if (e.key === "Enter") {
@@ -340,9 +406,199 @@ $testGroupId.addEventListener("keydown", (e) => {
   }
 });
 
-// ── 初始化 ────────────────────────────────────────
+// ── 定时计划管理 ──────────────────────────────────
+
+// 当前列表快照（供按索引操作）与表单模式（null=新增 / 字符串=编辑中的计划原名）
+let currentSchedules = [];
+let editingScheduleName = null;
+
+async function refreshSchedules() {
+  $refreshSchedulesBtn.disabled = true;
+  $refreshSchedulesBtn.textContent = "加载中...";
+
+  const data = await apiGet("/schedules");
+
+  $refreshSchedulesBtn.disabled = false;
+  $refreshSchedulesBtn.textContent = "刷新";
+
+  // bridge 已剥壳：data 即 {schedules, total, day_type_labels}
+  if (data && Array.isArray(data.schedules)) {
+    renderSchedules(data.schedules, data.day_type_labels || {});
+    showToast("计划列表已刷新", "success");
+  }
+}
+
+function renderSchedules(schedules, labels) {
+  // 缓存列表，供编辑/启停/删除按索引取用（避免把计划名拼进内联 onclick）
+  currentSchedules = schedules || [];
+
+  if (!schedules || schedules.length === 0) {
+    $schedulesList.innerHTML = '<div class="empty-state">暂无定时计划，点击「+ 添加计划」创建</div>';
+    return;
+  }
+
+  $schedulesList.innerHTML = schedules
+    .map((s, idx) => {
+      const name = escapeHtml(s.name || "?");
+      const dayLabel = labels[s.day_type] || s.day_type || "每天";
+      const time = s.offline_time || "?";
+      const flt = s.float_range || 0;
+      const enabled = s.enabled !== false;
+
+      const floatText = flt > 0 ? ` 浮动±${flt}min` : "";
+      const badgeClass = enabled ? "badge-on" : "badge-off";
+      const badgeText = enabled ? "启用" : "禁用";
+      const itemClass = enabled ? "" : "disabled";
+      const toggleLabel = enabled ? "禁用" : "启用";
+
+      return `
+      <div class="schedule-item ${itemClass}" data-name="${name}">
+        <div class="schedule-info">
+          <div class="schedule-name-line">
+            <span class="schedule-name">${name}</span>
+            <span class="badge ${badgeClass}">${badgeText}</span>
+          </div>
+          <div class="schedule-detail">
+            日期: ${dayLabel} | 下线: ${time}${floatText}
+          </div>
+        </div>
+        <div class="schedule-actions">
+          <button class="btn btn-sm" onclick="editSchedule(${idx})">编辑</button>
+          <button class="btn btn-sm" onclick="toggleSchedule(${idx}, ${!enabled})">${toggleLabel}</button>
+          <button class="btn btn-sm btn-danger" onclick="deleteSchedule(${idx})">删除</button>
+        </div>
+      </div>`;
+    })
+    .join("");
+}
+
+function showAddForm() {
+  editingScheduleName = null;
+  $scheduleFormTitle.textContent = "添加计划";
+  $schedName.value = "";
+  $schedName.disabled = false;
+  $schedDayType.value = "everyday";
+  $schedTime.value = "23:00";
+  $schedFloat.value = "0";
+  $scheduleForm.style.display = "block";
+}
+
+function showEditForm(schedule) {
+  editingScheduleName = schedule.name;
+  $scheduleFormTitle.textContent = `编辑计划「${schedule.name}」`;
+  $schedName.value = schedule.name || "";
+  // 名称是计划的唯一标识，编辑时不允许改名
+  $schedName.disabled = true;
+  $schedDayType.value = schedule.day_type || "everyday";
+  $schedTime.value = schedule.offline_time || "23:00";
+  $schedFloat.value = String(schedule.float_range || 0);
+  $scheduleForm.style.display = "block";
+}
+
+function hideForm() {
+  editingScheduleName = null;
+  $schedName.disabled = false;
+  $scheduleForm.style.display = "none";
+}
+
+async function saveSchedule() {
+  const name = $schedName.value.trim();
+  const dayType = $schedDayType.value;
+  const offlineTime = $schedTime.value || "23:00";
+  const floatRange = parseInt($schedFloat.value) || 0;
+  const isEdit = !!editingScheduleName;
+
+  if (!name) {
+    showToast("请输入计划名称", "error");
+    return;
+  }
+
+  $saveScheduleBtn.disabled = true;
+  $saveScheduleBtn.textContent = "保存中...";
+
+  const payload = {
+    name: name,
+    day_type: dayType,
+    offline_time: offlineTime,
+    float_range: Math.max(0, Math.min(floatRange, 10)),
+  };
+  // bridge SDK 无 PUT，修改走 POST + action=update
+  if (isEdit) {
+    payload.action = "update";
+  }
+
+  const data = await apiPost("/schedules", payload);
+
+  $saveScheduleBtn.disabled = false;
+  $saveScheduleBtn.textContent = "保存";
+
+  if (data && data.success) {
+    hideForm();
+    refreshSchedules();
+    refreshStatus(); // 同步刷新调度器状态
+    showToast(
+      data.message || (isEdit ? `已更新计划「${name}」` : `已添加计划「${name}」`),
+      "success"
+    );
+  } else {
+    showToast(data?.error || (isEdit ? "更新失败" : "添加失败"), "error");
+  }
+}
+
+function editSchedule(idx) {
+  const s = currentSchedules[idx];
+  if (!s) {
+    showToast("未找到该计划，请刷新后重试", "error");
+    return;
+  }
+  showEditForm(s);
+}
+
+async function toggleSchedule(idx, enable) {
+  const s = currentSchedules[idx];
+  if (!s) {
+    showToast("未找到该计划，请刷新后重试", "error");
+    return;
+  }
+
+  const data = await apiPost("/schedules", {
+    name: s.name,
+    action: enable ? "enable" : "disable",
+  });
+
+  if (data && data.success) {
+    refreshSchedules();
+    refreshStatus();
+    showToast(data.message, "success");
+  } else {
+    showToast(data?.error || "操作失败", "error");
+  }
+}
+
+async function deleteSchedule(idx) {
+  const s = currentSchedules[idx];
+  if (!s) {
+    showToast("未找到该计划，请刷新后重试", "error");
+    return;
+  }
+
+  if (!confirm(`确定要删除计划「${s.name}」吗？此操作不可恢复。`)) {
+    return;
+  }
+
+  const data = await apiPost("/schedules", { name: s.name, action: "delete" });
+
+  if (data && data.success) {
+    refreshSchedules();
+    refreshStatus();
+    showToast(data.message, "success");
+  } else {
+    showToast(data?.error || "删除失败", "error");
+  }
+}
 
 document.addEventListener("DOMContentLoaded", () => {
   refreshStatus();
   refreshRecords();
+  refreshSchedules();
 });

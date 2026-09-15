@@ -3,20 +3,18 @@ PromptStore - 命名的提示词方案库（JSON 持久化）
 
 用途:
   让「下线通知」插件的提示词从「内置硬编码」变为「明置 + 可多套独立管理」。
-  管理员可以在配置面板里填写自定义提示词（custom_builtin_prompt /
-  custom_manual_prompt），也可以把若干套提示词存成「命名方案」，
+  管理员可在配置面板填写 custom_prompt，也可把若干套提示词存成「命名方案」，
   互不干扰地保存 / 切换 / 删除，满足多用户 / 多场景需求。
 
   在 LLMGenerator.get_effective_prompts() 中，命名方案的优先级最高：
-      激活方案 > 配置自定义 > 内置默认（BUILTIN_PROMPT / MANUAL_PROMPT）
+      激活方案 > 配置自定义 custom_prompt > 内置默认（DEFAULT_PROMPT）
 
 存储结构（prompts.json，位于插件数据目录）:
   {
     "_active": "方案名 或 null",
     "profiles": {
       "方案名": {
-        "builtin_prompt": "...",   # 自动调度场景提示词
-        "manual_prompt": "...",     # /下线通知 生成 手动场景提示词
+        "prompt": "...",            # 该方案的提示词（自动/手动共用）
         "created_at": 1234567890,
         "updated_at": 1234567890
       },
@@ -92,13 +90,12 @@ class PromptStore:
 
     # ── 写入 ────────────────────────────────────────────
 
-    def upsert(self, name: str, builtin_prompt: str, manual_prompt: str):
+    def upsert(self, name: str, prompt: str):
         """新增 / 更新一个命名方案（存在则覆盖内容、保留 created_at）。
 
         Args:
             name: 方案名（不能为空）
-            builtin_prompt: 自动场景提示词
-            manual_prompt: 手动场景提示词
+            prompt: 该方案的提示词（自动与手动通知共用）
         """
         if not name or not name.strip():
             return
@@ -107,8 +104,7 @@ class PromptStore:
         profs = self._cache.setdefault("profiles", {})
         existing = profs.get(name, {})
         profs[name] = {
-            "builtin_prompt": builtin_prompt or "",
-            "manual_prompt": manual_prompt or "",
+            "prompt": prompt or "",
             "created_at": existing.get("created_at", now),
             "updated_at": now,
         }
