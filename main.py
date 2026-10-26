@@ -23,6 +23,7 @@ AI下线通知系统 - AstrBot 插件主入口
 
 import asyncio
 import random
+import time
 from datetime import datetime
 from pathlib import Path
 from astrbot.api.event import filter, AstrMessageEvent
@@ -32,7 +33,7 @@ from astrbot.api import logger, AstrBotConfig
 from .core import (NotificationScheduler, GroupNotifier, TemplateEngine,
                    SchedulerMonitor, LLMGenerator, RecordStore, PromptStore,
                    ScheduleStore, WindowState, PlatformCaps, SessionActivityTracker,
-                   resolve_platform, resolve_platforms,
+                   resolve_platform, resolve_platforms, platforms_pending_load,
                    validate_target_id, validate_target_id_multi,
                    QQ_OFFICIAL_PASSIVE_TTL, sync_changelog_from_readme)
 
@@ -66,6 +67,11 @@ class OfflineNotifyPlugin(Star):
 
         # 窗口触发时的发送去重/并发锁（防止同一条入站消息触发多次发送）
         self._firing: set = set()
+        # 已抽样、仍在 sleep 的浮动任务占位：保证同一窗口只抽一次，
+        # 且记录下来的 float_seconds 就是真正生效的那个值
+        self._pending_fire: set = set()
+        # 平台画像补解析的冷却时间戳（热重载自愈用）
+        self._caps_retry_at: float = 0.0
 
         # 获取插件数据目录
         self.plugin_data_dir = StarTools.get_data_dir("astrbot_plugin_offline_notify")
@@ -182,6 +188,15 @@ class OfflineNotifyPlugin(Star):
         self.capses = resolve_platforms(self.context, self.platform_ids)
         # 自动回退后同步真实生效的 ID，避免后续日志/命令回显不一致
         self.platform_id = self.caps.platform_id
+        if platforms_pending_load(self.context) and not any(
+            getattr(c, "found", False) for c in self.capses
+        ):
+            # 启动早期：插件先于平台实例加载，拿不到实例属预期路径，
+            # 不要打印"(未找到已启用的同名平台实例)"这类迷惑信息
+            logger.info(
+                "[离线通知] 生效平台: 等待平台加载（on_platform_loaded 后自动刷新）"
+            )
+            return
         logger.info(
             "[离线通知] 生效平台: "
             + " | ".join(c.describe() for c in self.capses)
@@ -233,9 +248,20 @@ class OfflineNotifyPlugin(Star):
             logger.debug("[离线通知] 窗口触发判断异常，忽略", exc_info=True)
 
     def _ensure_caps(self):
-        """发送前兜底：若所有平台都仍未解析成功，再尝试解析一次。"""
-        if not any(c.found for c in self.capses):
-            self._resolve_platform_caps()
+        """兜底：若所有平台都仍未解析成功，再尝试解析一次。
+
+        带 10s 冷却：平台确实不存在时，避免每条消息都重算一遍并刷错误日志。
+        热重载场景下这是唯一的自愈路径（on_platform_loaded 不会再触发）。
+        """
+        if any(c.found for c in self.capses):
+            return
+        now = time.monotonic()
+        if now - self._caps_retry_at < 10.0:
+            return
+        self._caps_retry_at = now
+        self._resolve_platform_caps()
+        if self.monitor:
+            self.monitor.capses = self.capses
 
     def _notify_result(self, event: AstrMessageEvent, text: str):
         """构造通知内容的回复结果，按平台能力决定是否强制纯文本。
@@ -360,6 +386,10 @@ class OfflineNotifyPlugin(Star):
         armed = self.window_state.armed_plans()
         if not armed:
             return
+        # 热重载不会重新触发 on_platform_loaded：若初始化时平台尚未就绪，
+        # 画像会一直停在「未找到」，下面这道门就会永久 return，整个窗口
+        # 一次都发不出去。进窗口且有事件时补一次解析（带冷却，避免刷日志）。
+        self._ensure_caps()
         if not any(c.is_qq_official for c in self.capses):
             return
 
@@ -382,24 +412,57 @@ class OfflineNotifyPlugin(Star):
                         _task.add_done_callback(self._log_fire_task_done)
                         return
 
+    def _resolve_float_minutes(self, plan: dict) -> float:
+        """本次生效的浮动范围（分钟）：计划级 float_range>0 覆盖全局配置。
+
+        旧实现只读全局 ``trigger_float_minutes``，导致 ScheduleStore 里
+        计划级 float_range（WebUI 可编辑、注释明确写着「>0 覆盖全局」）
+        成为死配置，永远不生效。
+        """
+        plan_range = 0.0
+        try:
+            plan_range = float(plan.get("float_range") or 0)
+        except (TypeError, ValueError):
+            plan_range = 0.0
+        if plan_range > 0:
+            return min(plan_range, QQ_OFFICIAL_PASSIVE_TTL / 60.0)
+        try:
+            return min(float(self.config.get("trigger_float_minutes", 5)),
+                       QQ_OFFICIAL_PASSIVE_TTL / 60.0)
+        except (TypeError, ValueError):
+            return 5.0
+
     async def _fire_with_float(self, plan: dict, gid: str):
-        """命中目标群后，按 trigger_float_minutes 随机延迟再发送（模拟自然节奏）。"""
+        """命中目标群后，按浮动范围随机延迟再发送（模拟自然节奏）。
+
+        去重必须在 sleep **之前**占位：一个窗口内可能连续命中多条群消息，
+        若等 sleep 结束才由 ``_fire_plan`` 登记，则每次命中都各自抽样、各自
+        sleep，最后只有最早醒来的那次真正发送 —— 实际延迟退化为
+        ``min(多次抽样)``（实测同日出现 22s+7s、56s+3s 两组），而记录里
+        又拿不到这个值，最终全表显示「精确」。
+        """
         plan_name = plan.get("name", "")
-        if plan_name in self._firing:
+        if plan_name in self._firing or plan_name in self._pending_fire:
+            return
+        if self.window_state.already_sent_today(plan_name):
             return
 
-        # 随机浮动延迟：默认 5 分钟内（cap 到 msg_id 被动窗口 TTL 内）
-        float_minutes = self.config.get("trigger_float_minutes", 5)
-        max_delay = min(float(float_minutes), QQ_OFFICIAL_PASSIVE_TTL / 60.0)
+        # 浮动范围：计划级优先，且 cap 到被动 msg_id 有效期（睡醒后仍可发）
+        max_delay = self._resolve_float_minutes(plan)
         delay = random.uniform(0, max_delay * 60) if max_delay > 0 else 0.0
+
+        self._pending_fire.add(plan_name)
         logger.info(
             f"[离线通知] 计划 '{plan_name}' 命中目标群 {gid}，"
-            f"随机浮动 {delay:.0f}s 后发送"
+            f"随机浮动 {delay:.1f}s 后发送（范围 0~{max_delay:.0f}min）"
         )
-        if delay > 0:
-            await asyncio.sleep(delay)
-        await self._fire_plan(plan_name, plan.get("offline_time", "23:00"),
-                              trigger="event")
+        try:
+            if delay > 0:
+                await asyncio.sleep(delay)
+            await self._fire_plan(plan_name, plan.get("offline_time", "23:00"),
+                                  trigger="event", float_seconds=delay)
+        finally:
+            self._pending_fire.discard(plan_name)
 
     def _log_fire_task_done(self, task: "asyncio.Task"):
         """后台触发任务完成回调：吞掉未捕获异常，避免后台任务异常静默丢失。"""
@@ -410,8 +473,13 @@ class OfflineNotifyPlugin(Star):
 
     async def _fire_plan(self, plan_name: str, offline_time: str, *,
                          allow_proactive: bool = False,
-                         trigger: str = "event") -> bool:
+                         trigger: str = "event",
+                         float_seconds: float = 0.0) -> bool:
         """生成并发送下线通知到所有目标群（去重 + 并发锁 + 记录）。
+
+        ``float_seconds`` 为本次**真正生效**的随机浮动秒数（由
+        ``_fire_with_float`` 抽样并 sleep 后传入），用于写入发送记录。
+        旧实现在记录处硬编码 0.0，导致 WebUI「浮动」列恒显示「精确」。
 
         ``allow_proactive=True`` 时不因缺少被动 msg_id 直接放弃，允许走群主动
         推送；仍会校验适配器是否具备主动推送条件（见 ``notifier._precheck``）。
@@ -451,13 +519,21 @@ class OfflineNotifyPlugin(Star):
                 allow_proactive=allow_proactive,
             )
 
+            # 记录侧参数取「计划级优先」的真实配置，float_seconds 取本次抽样值
+            plan = self.schedule_store.get(plan_name) or {}
             await self.record_store.add(
                 schedule_name=plan_name,
                 offline_time=offline_time,
-                advance_minutes=0,
-                float_range=self.config.get("trigger_float_minutes", 5),
+                # advance_minutes 是计划里的历史字段；新计划不再写它，
+                # 此时退回配置里的监听窗口前置分钟数，避免恒记 0
+                advance_minutes=int(
+                    plan.get("advance_minutes")
+                    or self.config.get("window_before_minutes", 3)
+                    or 0
+                ),
+                float_range=int(round(self._resolve_float_minutes(plan))),
                 actual_trigger_minutes=countdown,
-                float_seconds=0.0,
+                float_seconds=float_seconds,
                 message_source=message_source,
                 results=result,
             )

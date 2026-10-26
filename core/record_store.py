@@ -104,11 +104,19 @@ class RecordStore:
             "advance_minutes": advance_minutes,
             "float_range": float_range,
             "actual_trigger_minutes": round(actual_trigger_minutes, 1),
-            "float_seconds": round(float_seconds, 0),
+            # 保留 1 位小数：旧实现 round(x, 0) 会把 0.4s 的浮动舍成 0，
+            # 前端再据此判定「精确」，等于把「有浮动」误报成「无浮动」
+            "float_seconds": round(float_seconds, 1),
+            # v2.0.3 起浮动值才真正被采集；老记录没有该标记，
+            # 前端据此显示「—（未采集）」而不是伪造一个 0s
+            "float_recorded": True,
             "message_source": message_source,
             "results": {
                 "success": results.get("success", []),
                 "failed": results.get("failed", []),
+                # notifier 已区分「跳过」（无被动 msg_id / 主动推送不可用），
+                # 旧实现只存 success/failed，WebUI 只能显示「成功 0」且看不出原因
+                "skipped": results.get("skipped", []),
                 "total": results.get("total", 0),
             }
         }
@@ -124,7 +132,7 @@ class RecordStore:
         logger.info(
             f"[离线通知] 已记录: 计划 '{schedule_name}', "
             f"实际提前 {actual_trigger_minutes:.1f} 分钟, "
-            f"浮动 {float_seconds:.0f}s, "
+            f"浮动 {float_seconds:.1f}s, "
             f"来源 {message_source}, "
             f"发送 {results.get('total', 0)} 个群组"
         )

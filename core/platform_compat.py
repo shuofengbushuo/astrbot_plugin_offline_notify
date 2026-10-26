@@ -127,6 +127,29 @@ def _iter_platform_insts(context) -> list:
         return []
 
 
+def platforms_pending_load(context) -> bool:
+    """平台实例尚未加载完（启动早期）时返回 True。
+
+    内核 ``core_lifecycle`` 里 ``plugin_manager.reload()`` 早于
+    ``platform_manager.initialize()``，插件初始化阶段拿不到任何平台实例
+    是**预期路径**；此时若配置里已有启用平台，说明只是"还没加载"，
+    而不是"没有配置"。仅用于区分日志等级/文案，不参与任何发送决策。
+    """
+    try:
+        if _iter_platform_insts(context):
+            return False
+        mgr = getattr(context, "platform_manager", None)
+        platforms = getattr(mgr, "platforms_config", None)
+        if not isinstance(platforms, list):
+            return False
+        for item in platforms:
+            if isinstance(item, dict) and item.get("enable", True):
+                return True
+    except Exception:  # pragma: no cover - 防御性
+        return False
+    return False
+
+
 def _meta_of(inst) -> Tuple[str, str]:
     """返回 (platform_id, platform_type)，取不到时返回空串。"""
     try:
@@ -239,7 +262,14 @@ def resolve_platforms(
     # 没有任何精确匹配 → 回退 / 报错
     candidates = [(inst, *_meta_of(inst)) for inst in insts if _meta_of(inst)[0]]
     if not candidates:
-        logger.error("[离线通知] 当前没有任何已启用的平台实例，通知无法送达。")
+        if platforms_pending_load(context):
+            # 启动早期：平台已配置但实例尚未实例化（on_platform_loaded 会重新解析）
+            logger.info(
+                "[离线通知] 平台实例尚未加载（启动早期属预期），"
+                "已注册 on_platform_loaded 钩子，加载后自动生效。"
+            )
+        else:
+            logger.error("[离线通知] 当前没有任何已启用的平台实例，通知无法送达。")
         return [_build_caps(configured_ids[0] if configured_ids else "",
                            "", None, "config", overrides, found=False)]
 

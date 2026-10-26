@@ -13,6 +13,7 @@ from .platform_compat import (
     SessionActivityTracker,
     resolve_platform,
     resolve_platforms,
+    platforms_pending_load,
     validate_target_id,
     validate_target_id_multi,
     inspect_qq_official_session,
@@ -22,7 +23,7 @@ from .platform_compat import (
 __all__ = ["NotificationScheduler", "GroupNotifier", "TemplateEngine",
            "SchedulerMonitor", "LLMGenerator", "RecordStore", "PromptStore",
            "ScheduleStore", "WindowState", "PlatformCaps", "SessionActivityTracker",
-           "resolve_platform", "resolve_platforms", "validate_target_id",
-           "validate_target_id_multi",
+           "resolve_platform", "resolve_platforms", "platforms_pending_load",
+           "validate_target_id", "validate_target_id_multi",
            "inspect_qq_official_session", "QQ_OFFICIAL_PASSIVE_TTL",
            "sync_changelog_from_readme", "build_changelog"]

@@ -344,16 +344,43 @@ function renderRecords(records, total) {
       const dt = r.datetime || "未知";
       const name = escapeHtml(r.schedule_name || "未知");
       const offline = r.offline_time || "?";
-      const actual = r.actual_trigger_minutes || "?";
-      const floatS = r.float_seconds || 0;
+
+      // 数字字段一律先转 Number 再判，避免 0 被 `||` 当成缺失
+      // （旧写法 r.actual_trigger_minutes || "?" 会把准点发送的 0.0 显示成 ?min）
+      const actualNum = Number(r.actual_trigger_minutes);
+      const actualCell = Number.isFinite(actualNum)
+        ? `${actualNum.toFixed(1)}min`
+        : "?min";
+
+      const floatNum = Number(r.float_seconds);
+      const floatRangeNum = Number(r.float_range);
+
+      // 浮动列按数据可得性分档：
+      //   旧记录（无 float_recorded）—— 当时根本没采集，不能伪造 0s
+      //   float_range=0            —— 浮动功能未启用
+      //   实测值                    —— 本次真正生效的抽样延迟
+      // 「0」不再翻译成「精确」：0 只代表本次没叠加延迟，
+      // 而这条通知的发出时刻本来由「群消息何时到来」决定，谈不上精确。
+      let floatCell;
+      if (r.float_recorded !== true) {
+        floatCell = '<span style="color:#7f8c8d" title="v2.0.3 之前的记录未采集浮动值">—</span>';
+      } else if (!Number.isFinite(floatNum)) {
+        floatCell = '<span style="color:#7f8c8d">—</span>';
+      } else if (floatNum <= 0) {
+        floatCell = floatRangeNum > 0
+          ? '<span class="float-cell">0s</span>'
+          : '<span style="color:#7f8c8d">未启用</span>';
+      } else if (floatNum < 60) {
+        floatCell = `<span class="float-cell">${floatNum.toFixed(1)}s</span>`;
+      } else {
+        floatCell = `<span class="float-cell">${(floatNum / 60).toFixed(1)}min</span>`;
+      }
+
       const source = r.message_source || "template";
       const results = r.results || {};
       const successCount = (results.success || []).length;
       const failedCount = (results.failed || []).length;
-
-      const floatCell = floatS > 0
-        ? `<span class="float-cell">${floatS}s</span>`
-        : '<span style="color:#7f8c8d">精确</span>';
+      const skippedCount = (results.skipped || []).length;
 
       const sourceCell = source === "llm"
         ? '<span class="source-llm">LLM</span>'
@@ -363,12 +390,16 @@ function renderRecords(records, total) {
       if (failedCount > 0) {
         resultCell += ` / <span class="result-fail">失败 ${failedCount}</span>`;
       }
+      // 跳过 ≠ 失败：通常是窗口内没有可用被动 msg_id，需单独标注
+      if (skippedCount > 0) {
+        resultCell += ` / <span style="color:#b45309">跳过 ${skippedCount}</span>`;
+      }
 
       return `<tr>
         <td>${dt}</td>
         <td>${name}</td>
         <td>${offline}</td>
-        <td>${actual}min</td>
+        <td>${actualCell}</td>
         <td>${floatCell}</td>
         <td>${sourceCell}</td>
         <td>${resultCell}</td>

@@ -1,7 +1,7 @@
 name: astrbot_plugin_offline_notify
 display_name: AI下线通知系统
 desc: 仅适配 QQ 官方机器人（qq_official / qq_official_webhook），以「被动窗口事件驱动」方式向 QQ 群发送 AI 服务下线提醒：QQ 官方群消息必须携带 5 分钟内的被动 msg_id 才能送达，故划定下线时间前后的时间窗口，窗口内检测到目标群发言即借被动 msg_id 触发发送；窗口内无人发言则本次不发送（无 msg_id 时适配器会静默丢弃，不再做无效的主动推送降级）。支持 LLM 以通用、中立的默认提示词生成离场通知（规避 AI/系统口吻与「XX:XX 下线」字眼，提示词可完全自定义）、窗口提前/延后与触发浮动全局可配置、多群组、发布记录查询、管理员手动生成、提示词可在配置面板完全自定义。长通知合并单条发送（规避官方频控）。定时计划支持通过 QQ 聊天命令（/下线通知 计划）可视化增删改与热重载，无需编辑 JSON 配置
-version: v2.0.1
+version: v2.0.3
 author: AstrBot User
 repo: https://github.com/shuofengbushuo/astrbot_plugin_offline_notify
 tags:
